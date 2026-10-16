@@ -1,0 +1,22 @@
+{
+  "name": "tokei-win",
+  "productName": "Tokei",
+  "version": "0.1.0",
+  "description": "Windows 托盘 AI 编程用量监控（Tokei 的 Windows 版）",
+  "main": "dist/main/index.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "start": "npm run build && electron .",
+    "cli": "npm run build && node dist/cli.js",
+    "test": "npm run build && vitest run",
+    "dist": "npm run build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.0",
+    "electron": "^44.5.1",
+    "typescript": "5.7",
+    "vitest": "^2.1.9"
+  }
+}

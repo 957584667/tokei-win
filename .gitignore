@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+
+# 无头 Edge 验证产物：全部由 scratch/panel-harness.cjs + scratch/edge-one.sh 现场重生成，不入库
+scratch/*.html
+scratch/*.txt
+scratch/*.err
+scratch/*.png
+scratch/ep-*/
+scratch/edge-profile*/
+scratch/before-A/
+scratch/tsc/
+scratch/_payload.json
+scratch/_probe.js
+scratch/trail-real.json

@@ -1,0 +1,1230 @@
+:root {
+  /* 对应 Design.swift:77-81 的 Theme.bg：上 #333640/.92 → 下 #1F2129/.95，
+     叠在窗口的系统亚克力材质上（透明档位见 index.ts 的 createPanel） */
+  --bg: linear-gradient(to bottom, rgba(51, 54, 64, .92), rgba(31, 33, 41, .95));
+  /* 对应 Color.primary 的低透明填充：macOS 所有表面都靠它，一律没有描边 */
+  --fill-4: rgba(255, 255, 255, .04);  /* 项目行、卡片行、设置行、输入框 */
+  --fill-5: rgba(255, 255, 255, .05);  /* 展开面板、诊断块 */
+  --fill-6: rgba(255, 255, 255, .06);  /* 搜索框、圆钮、分段容器 */
+  --line: rgba(255, 255, 255, .08);    /* thinDivider */
+  --radius: 10px;
+  --text: var(--ui-1);
+  --text-2: var(--ui-2);
+  --text-3: var(--ui-3);
+  /* 对应 Theme.tPrimary / tSecondary / tTertiary：深色面板上的三级白 */
+  --ui-1: rgba(255, 255, 255, .97);
+  --ui-2: rgba(255, 255, 255, .82);
+  --ui-3: rgba(255, 255, 255, .58);
+  /* 旧变量名保留但收到同一套值上：项目/曲线/设置页以前用实色灰，和 macOS 的半透白是两套 */
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  /* 对应 design: .rounded 的大数字与品牌名。Windows 11 没有系统圆角字体，
+     这里按 ui-rounded → 常见圆角字面 → Segoe UI 逐级退回，装得上圆角字体的机器会自动升档 */
+  --num: ui-rounded, "SF Pro Rounded", "VAG Rounded", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 外壳：对应 PanelView body 的 .frame(width: w) + panelContent 的 padding(15)/spacing(13)。
+   与 macOS 的差别：顶部条与 footer 钉在上下，滚动交给中间的 .view-stack（SwiftUI 是整页 ScrollView）。 */
+.scroll { flex: 1; overflow: hidden; }
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 15px;
+  height: 100%;
+}
+.topbar, .panel-foot { flex: none; }
+/* 滚动区：sticky 的 .set-head 以这里为滚动容器；右侧滚动条对应 PV:222 的 showsIndicators: true。
+   滚动条必然从盒子里占掉 8px，所以整块向外扩张到贴住窗口两边、右侧只留 7px 内边距，
+   让内容区仍是 macOS 的 610 宽；两列 620 比 610 宽（macOS 自身即如此溢出），
+   裁剪边界用 overflow-clip-margin 推回窗口边，不然第二列的右圆角会被切掉。 */
+.view-stack {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: clip;
+  overflow-clip-margin: 8px;
+  margin: 0 -15px;
+  padding: 0 7px 0 15px;
+}
+.view-stack::-webkit-scrollbar { width: 8px; }
+.view-stack::-webkit-scrollbar-track { background: transparent; }
+.view-stack::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .18); border-radius: 4px; }
+.view-stack::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .28); }
+.filler { flex: 1; }
+
+.topbar { display: flex; align-items: center; gap: 9px; }
+.brand {
+  display: flex; align-items: center; gap: 9px; min-width: 0;
+  border: 0; padding: 0; background: transparent; color: var(--text);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.mark { width: 16px; height: 16px; flex: none; }
+/* 节日角标（PV:291-294）：overlay 的 topTrailing 锚点再 offset(7,-7) */
+.mark-wrap { position: relative; flex: none; display: flex; }
+.festive { position: absolute; top: -7px; right: -7px; font-size: 11px; line-height: 1; }
+.brand-text { display: flex; flex-direction: column; min-width: 0; }
+.brand-text strong { font-size: 15px; font-weight: 700; letter-spacing: 0.5px; font-family: var(--num); }
+.brand-sub { font-size: 9px; color: var(--ui-3); }
+.muted { color: var(--text-3); font-size: 11px; }
+.stamp { font-size: 9.5px; color: var(--ui-3); font-family: var(--mono); white-space: nowrap; }
+
+/* header 右侧的换页圆钮：24×24、底色 primary .06，选中态用品牌色 */
+.mode-btn {
+  flex: none;
+  width: 24px; height: 24px;
+  display: grid; place-items: center;
+  border: 0; padding: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .06);
+  color: var(--ui-3);
+  cursor: pointer;
+}
+.mode-btn svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.mode-btn:hover { background: rgba(255, 255, 255, .10); color: var(--ui-1); }
+.mode-btn.is-active { color: #eb8566; }
+
+.view { display: none; }
+.view.is-active { display: block; }
+
+/* 区间选择：对应 SegmentedTabs（容器 pad3/圆角11/底 primary .06，段文字 12） */
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(255, 255, 255, .06);
+  border-radius: 11px;
+}
+.seg {
+  flex: 1;
+  padding: 5px 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  /* 未选中是 SwiftUI 的 .secondary（约白 .55），不是 Theme.tSecondary；
+     --ui-3 的 .58 是这里唯一对得上的档位 */
+  color: var(--ui-3);
+  font-size: 12px;
+  cursor: pointer;
+}
+/* 选中态是 ultraThinMaterial 那层浮起：Electron 没有 vibrancy，用同样的圆角 +
+   描边 primary .14 + 阴影 black .18 r3 y1 复刻，底色取材质的近似亮度 */
+.seg.is-active {
+  background: linear-gradient(rgba(255, 255, 255, .12), rgba(255, 255, 255, .07));
+  color: var(--ui-1);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18), inset 0 0 0 1px rgba(255, 255, 255, .14);
+}
+
+/* 带滑动指示块的区间选择（macOS 用 matchedGeometryEffect 让同一块底在段间移动）。
+   这块底改成常驻元素，段本身只留文字，切换时靠 left/width 过渡复现那记弹簧。 */
+.segmented.is-sliding { position: relative; }
+.seg-pill {
+  position: absolute; top: 3px; left: 0; width: 0; height: 0; z-index: 0; pointer-events: none;
+  border-radius: 8px;
+  background: linear-gradient(rgba(255, 255, 255, .12), rgba(255, 255, 255, .07));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .18), inset 0 0 0 1px rgba(255, 255, 255, .14);
+  transition: left .32s cubic-bezier(.34, 1.3, .64, 1), width .32s cubic-bezier(.34, 1.3, .64, 1);
+}
+.segmented.is-sliding .seg { position: relative; z-index: 1; }
+.segmented.is-sliding .seg.is-active { background: transparent; box-shadow: none; }
+@media (prefers-reduced-motion: reduce) { .seg-pill { transition: none; } }
+
+/* ---- 用量页卡片（对应 Design.swift 的 Card / MetricCell / RingMetricCell / MiniBar
+       与 PanelView 的 cardHead / CostHeadline / metricGrid） ---- */
+#view-usage.is-active { display: flex; flex-direction: column; gap: 13px; }
+.card-zone { display: flex; flex-direction: column; gap: 13px; }
+/* 对应 EqualHeightGrid(columns:2, h/v 13)：同一行两张卡等高，靠 grid 默认的 stretch 达成 */
+.tool-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; align-items: stretch; }
+.tool-grid.is-single { grid-template-columns: minmax(0, 1fr); }
+
+.card {
+  --tint: #8a8a95;
+  position: relative;
+  display: flex; flex-direction: column; gap: 11px;
+  padding: 13px;
+  border-radius: 16px;
+  /* 三层叠加：顶部白 .05 渐隐 + tint .08 + 黑 .26（Card 的 background 就是这个顺序） */
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, .05), rgba(255, 255, 255, 0) 50%),
+    color-mix(in srgb, var(--tint) 8%, transparent),
+    rgba(0, 0, 0, .26);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, .30);
+  transition: transform .18s ease-out, box-shadow .18s ease-out;
+}
+/* tint 渐变描边（topLeading .38 → bottomTrailing .05）：伪元素画一圈再挖掉中间，
+   因为 border-image 不支持圆角。 */
+.card::after,
+.curve-card::after {
+  content: "";
+  position: absolute; inset: 0;
+  border-radius: 16px;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--tint) 38%, transparent),
+    color-mix(in srgb, var(--tint) 5%, transparent));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+.card:hover { box-shadow: 0 9px 16px rgba(0, 0, 0, .42); transform: scale(1.012); }
+
+.card-head { display: flex; align-items: center; gap: 7px; }
+.head-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--tint) 72%, #fff), var(--tint));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--tint) 60%, transparent);
+}
+.head-title { font-size: 14px; font-weight: 700; color: var(--ui-1); }
+.head-sessions {
+  font-size: 10px; font-weight: 700; line-height: 1.15; color: var(--tint);
+  font-family: var(--num);
+  padding: 1.5px 5px; border-radius: 999px;
+  background: color-mix(in srgb, var(--tint) 12%, transparent);
+}
+.head-copy {
+  flex: none; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%;
+  display: grid; place-items: center; cursor: pointer;
+  background: rgba(255, 255, 255, .06); color: var(--ui-3);
+}
+.head-copy svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.head-copy:hover, .head-copy.is-done { background: rgba(255, 255, 255, .10); }
+.head-copy.is-done { color: var(--tint); }
+
+/* CostHeadline：23 号粗体数值 + 10 号三级说明，基线对齐 */
+.headline { display: flex; align-items: baseline; gap: 7px; }
+.headline b { font-size: 23px; font-weight: 700; line-height: 1.1; color: #fff; font-family: var(--num); }
+.headline span { font-size: 10px; color: var(--ui-3); }
+
+/* metricGrid：两列 flexible、列距 10 行距 9 */
+.metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 10px; row-gap: 9px; }
+.metric { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.m-ic {
+  flex: none; width: 21px; height: 21px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: color-mix(in srgb, var(--tint) 10%, transparent); color: var(--tint);
+}
+.m-ic svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.m-ic .fill { fill: currentColor; stroke: none; }
+.m-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.m-label { font-size: 9.5px; line-height: 1.15; color: var(--ui-3); }
+.m-value {
+  font-size: 12.5px; font-weight: 600; line-height: 1.25; color: var(--ui-1);
+  font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* RingMetricCell：21 圆环、线宽 2.5、从 12 点顺时针 */
+.m-ring { flex: none; width: 21px; height: 21px; }
+.m-ring svg { display: block; width: 21px; height: 21px; }
+
+/* OpenClaw 只有任务数时的那一横排：对应 PV:1813-1837 的 HStack(spacing:16) +
+   VStack(spacing:2)，标签 10 号三级色、数值 16 号 rounded 粗体（.green / .red.opacity(.8)） */
+.tally { display: flex; gap: 16px; }
+.tally-cell { display: flex; flex-direction: column; gap: 2px; }
+.tally-label { font-size: 10px; color: var(--ui-3); }
+.tally-value { font-size: 16px; font-weight: 700; line-height: 1.2; font-family: var(--num); color: var(--ui-1); }
+.tally-value.is-ok { color: #29b894; }
+.tally-value.is-bad { color: rgba(255, 69, 63, .8); }
+
+.thin-div { height: 1px; background: rgba(255, 255, 255, .08); }
+
+/* ---- 设置页：对应 settingsContent 的双列 section 版式（PV:2665-2691）---- */
+#view-settings.is-active { display: flex; flex-direction: column; gap: 12px; }
+
+/* settingsHeader（PV:3794-3866）：30×30 圆徽 + 标题两行，右侧 24×24 圆钮。
+   圆钮是这一页的操作入口（GitHub / 关闭），所以跟着钉在滚动区顶部：
+   下面的行从它底经过时用面板顶部同色的底加模糊遮住。 */
+.set-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* 底色要盖到窗口边：这一页的双列本身就溢到 635，只铺内容宽度的话右侧会漏出一条 */
+  margin: 0 -15px;
+  padding: 0 15px 2px;
+  background: rgba(51, 54, 64, .86);
+  backdrop-filter: blur(14px) saturate(160%);
+}
+.set-badge {
+  flex: none; width: 30px; height: 30px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(235, 133, 102, .16); color: #eb8566;
+}
+.set-badge svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.set-titles { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.set-title-line { display: flex; align-items: baseline; gap: 6px; }
+.set-title { font: 700 15px/18px var(--num); color: var(--ui-1); }
+/* tTertiary 再叠 .6 透明度，是整页最暗的一档。行高必须比标题紧，
+   否则 baseline 对齐会把 8 号等宽的下沿顶到 18 之外，整行白胖 4px。 */
+.set-build { font: 8px/10px var(--mono); color: rgba(255, 255, 255, .35); }
+.set-sub { font-size: 9.5px; line-height: 12px; color: var(--ui-3); }
+.set-round {
+  flex: none; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--fill-6); color: var(--ui-3); cursor: pointer;
+}
+.set-round svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+/* xmark 是 10 号 bold，比 github 的 13 号小一圈 */
+#btn-settings-close svg { width: 10px; height: 10px; stroke-width: 2; }
+
+/* 两列各 settingsColumnWidth=(640-30-11)/2=304.5、列间 11（PV:144-146）。
+   620 比 610 的内容宽多出 10pt：右列因此贴到离窗边 5px 处，macOS 同样是这个数。 */
+.set-cols { display: flex; align-items: flex-start; gap: 11px; }
+.set-col { display: flex; flex-direction: column; gap: 11px; width: 304.5px; flex: none; }
+
+/* section 盒（PV:3868-3893）：r9 + 黑 .16 + 白 .06 的 0.7 描边，head 与 body 间隔 8 */
+.set-sec {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px; border-radius: 9px;
+  background: rgba(0, 0, 0, .16);
+  box-shadow: inset 0 0 0 .7px rgba(255, 255, 255, .06);
+}
+.set-sec-head { display: flex; align-items: center; gap: 6px; }
+.set-sec-ico {
+  flex: none; width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(235, 133, 102, .10); color: rgba(235, 133, 102, .95);
+}
+.set-sec-ico svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.set-sec-title { font-size: 12px; font-weight: 600; color: var(--ui-2); }
+.set-sec-body { display: flex; flex-direction: column; gap: 6px; }
+
+/* settingsRow（PV:4717-4741）：34 高、色点 + 名称 + mini 开关，外层 LazyVGrid 两列 spacing 7 */
+.set-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.set-tool {
+  display: flex; align-items: center; gap: 6px;
+  height: 34px; padding: 0 8px; border: 0; border-radius: 7px;
+  background: var(--fill-4); color: var(--ui-1);
+  font: 500 11px/1.3 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; text-align: left;
+  cursor: pointer;
+}
+.set-tool .dot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tint);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--tint) 40%, transparent);
+}
+.set-tool .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* settingsToggleRow（PV:3916-3929）：文本 11 + 右侧 mini 开关，pad 10/7、r8 */
+.set-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border-radius: 8px; background: var(--fill-4);
+}
+.set-row .name { flex: 1; font-size: 11px; color: var(--ui-1); }
+
+/* settingsValueRow（PV:3931-3939）：10 号标签与控件同行，只有横向 pad 10 */
+.set-vrow { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
+.set-vrow .name { flex: 1; font-size: 10px; color: var(--ui-3); }
+
+/* settingsStackedValue（PV:3941-3951）：标签压在控件上，pad 10/5 */
+.set-stacked { display: flex; flex-direction: column; gap: 5px; padding: 5px 10px; }
+.set-stacked-label { font-size: 10px; color: var(--ui-3); }
+/* settingsMenuPickerWidth = 列宽 - 40（PV:147） */
+.set-stacked .segmented.is-mini { width: 264.5px; flex: none; }
+
+/* mini 开关：对应 .toggleStyle(.switch) + .controlSize(.mini)，macOS 约 26×15、滑块 11 */
+.set-sw {
+  flex: none; position: relative; width: 26px; height: 15px; padding: 0; border: 0;
+  border-radius: 8px; background: rgba(120, 120, 128, .32); cursor: pointer;
+  transition: background .18s ease;
+}
+.set-sw::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  transition: left .18s ease;
+}
+.set-sw.is-on { background: #0a84ff; }
+.set-sw.is-on::after { left: 13px; }
+
+/* mini 分段选择器：controlSize(.mini)，样式那组还显式压到 9 号 medium。
+   高度钉死 18，否则同一页里 flex 上下文不同（set-stacked 与 p-row）会量出两种高度。 */
+.segmented.is-mini { padding: 2px; border-radius: 8px; height: 18px; }
+.segmented.is-mini .seg { padding: 0; border-radius: 6px; font-size: 9px; font-weight: 500; line-height: 14px; }
+
+/* settingsActionButton（PV:3895-3914）：图标 9 + 文案 10 medium，pad 10/5、r6 */
+.set-act {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 10px; border: 0; border-radius: 6px;
+  background: rgba(255, 255, 255, .08); color: var(--ui-1);
+  font-size: 10px; font-weight: 500; cursor: pointer;
+}
+.set-act svg { width: 9px; height: 9px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+/* bell.badge 的角标是实心点，SF Symbol 里它就是 filled */
+.set-act svg .badge { fill: currentColor; stroke: none; }
+/* section 体是 flex column，直接 append 的按钮会被拉伸到整行；原版 VStack 里按钮贴着左边 hug */
+.set-sec-body > .set-act { align-self: flex-start; }
+.set-act:disabled { opacity: .5; cursor: default; }
+/* display:inline-flex 会盖掉浏览器默认的 [hidden]，未存密钥时清除钮必须真的消失 */
+.set-act[hidden] { display: none; }
+
+/* 段内说明：8.5 三级（注释）与 9 medium 二级（额度摘要）两档 */
+.set-note { margin: 0; font-size: 8.5px; line-height: 1.35; color: var(--ui-3); }
+.set-hint2 { margin: 0; font-size: 9px; font-weight: 500; line-height: 1.35; color: var(--ui-2); }
+
+/* 用量页与项目页还在用的两条通用文案，设置页改版后留在原位 */
+.hint { color: var(--text-3); font-size: 11px; margin: 0 0 8px; }
+.empty { color: var(--text-3); font-size: 12px; padding: 18px 4px; text-align: center; }
+
+/* Provider 段内行：对应 providerSettingsField（PV:3162-3189，52 宽 9.5 标签 + 等宽输入）
+   与 z.ai 区域那行 9.5/52 + mini 分段（PV:3095-3107） */
+#provider-fields { display: flex; flex-direction: column; gap: 6px; }
+.p-group { font-size: 10px; font-weight: 600; }
+.p-row { display: flex; align-items: center; gap: 8px; }
+.p-row .segmented.is-mini { flex: 1; width: auto; }
+.p-label { flex: none; width: 52px; font-size: 9.5px; color: var(--ui-3); }
+.p-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--fill-5);
+  color: var(--text);
+  font-size: 9.5px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.p-row input::placeholder { color: var(--text-3); font-family: inherit; }
+.p-row input:focus { outline: 1px solid #e94a6e; outline-offset: -1px; }
+.p-clear { display: flex; justify-content: flex-end; }
+.provider-actions { display: flex; align-items: center; gap: 10px; }
+/* 保存结果：PV:3152-3156 是 8.5 号，成功 .green、失败 .orange（系统色的深档） */
+.provider-actions .muted { flex: 1; min-width: 0; font-size: 8.5px; text-align: right; }
+.provider-actions .muted.is-ok { color: #30d158; }
+.provider-actions .muted.is-warn { color: #ff9f0a; }
+
+/* ---- 诊断段（settingsDiagnosticsSection PV:3497-3557）---- */
+/* HStack(spacing: 8)：按钮 + mini 转圈 + Spacer + 22×22 圆形复制钮 */
+.diag-bar { display: flex; align-items: center; gap: 8px; }
+.diag-bar > .set-act { flex: none; }
+.diag-bar .filler { min-width: 0; }
+.diag-spin {
+  flex: none; width: 12px; height: 12px; border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, .18); border-top-color: var(--ui-2);
+  animation: spin 1s linear infinite;
+}
+.diag-copy {
+  flex: none; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%;
+  display: grid; place-items: center; background: var(--fill-6); color: var(--ui-3); cursor: pointer;
+}
+.diag-copy svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+/* 报告块：pad 8 / 圆角 6 / fill .05，内部列 spacing 6 */
+.diag-out {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; border-radius: 6px; background: var(--fill-5);
+}
+.diag-out[hidden] { display: none; }
+/* 摘要行：chevron(8 semibold) + 一行等宽摘要 + Spacer，整行 tSecondary，字号随展开换 */
+.diag-sum {
+  display: flex; align-items: flex-start; gap: 5px; padding: 0; border: 0;
+  background: none; color: var(--ui-2); cursor: pointer; text-align: left;
+}
+/* 收起 9 号、展开 8.5 号（PV:3533-3548 两处字号不同），等宽、单行 */
+.diag-chev { flex: none; width: 8px; height: 8px; margin-top: 3px; fill: none; stroke: currentColor; stroke-width: 2; }
+.diag-sum-text {
+  /* 摘要行是 HStack(alignment:.top)：文字吃掉 chevron 之外的整段宽度后截断，所以必须能缩 */
+  min-width: 0; flex: 1 1 auto; font-size: 9px; line-height: 1.35;
+  font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.diag-sum.is-open .diag-sum-text { font-size: 8.5px; }
+.diag-text {
+  margin: 0; font-size: 8.5px; line-height: 1.35; color: var(--ui-2);
+  font-family: var(--mono); white-space: pre-wrap; word-break: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; -webkit-line-clamp: 16;
+}
+.diag-text[hidden] { display: none; }
+
+/* ---- 远程采集的 copyBlock（PV:4683-4703）：pad 8 / 圆角 6 / fill .04，文字四行封顶 ---- */
+/* 原版是 HStack(alignment:.top) 的默认间距（macOS 8），夹着一个 Spacer(minLength:4)；
+   这里用 gap 8 + filler 的最小 4 复现，紧栏时文字到图标钮 8+4+8=20。 */
+.copy-block { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border-radius: 6px; background: var(--fill-4); }
+.copy-text {
+  margin: 0; min-width: 0; font-size: 8px; line-height: 1.35; color: var(--ui-2);
+  font-family: var(--mono); white-space: pre-wrap; word-break: break-word;
+  display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; -webkit-line-clamp: 4;
+}
+.copy-block .filler { flex: 1 0 4px; min-width: 4px; }
+.copy-btn {
+  flex: none; width: 14px; height: 14px; padding: 0; border: 0; background: none;
+  display: grid; place-items: center; color: var(--ui-3); cursor: pointer;
+}
+.copy-btn svg { width: 9px; height: 9px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+
+/* 项目足迹 */
+.trail-head { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; }
+.trail-bar {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  background: var(--fill-6);
+  border: 0;
+  border-radius: 8px;
+}
+.trail-icon { width: 10px; height: 10px; flex: none; color: var(--text-3); }
+.trail-search {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+.trail-search::placeholder { color: var(--text-3); }
+.trail-search:focus { outline: none; }
+.trail-clear { border: 0; background: transparent; color: var(--text-3); font-size: 11px; cursor: pointer; padding: 0 2px; }
+/* 对应 PTV:73 的 VStack(spacing:10)：分组标题与每一行都是它的直接子项，间隔统一 10 */
+.trail-list { display: flex; flex-direction: column; gap: 10px; }
+.trail-group {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  /* PTV:141 的 sectionHeader 还额外压了 .padding(.top, 4)：和上面那 10 是叠加的，
+     组标题前一共 14，比行距重一档 */
+  padding-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+.trail-group.is-dormant { color: var(--text-3); }
+.trail-zzz { font-size: 10px; }
+.trail-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 10px;
+  background: var(--fill-4);
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.trail-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.trail-title { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.trail-folder { width: 10px; height: 10px; flex: none; fill: currentColor; color: #eb8566; opacity: .8; }
+.trail-name { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trail-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; }
+.trail-path {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 9px;
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trail-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 9px; color: var(--text-3); }
+.trail-cost { color: var(--text-2); font-weight: 500; font-variant-numeric: tabular-nums; }
+.trail-sep { opacity: .6; }
+.trail-model {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 8px;
+  max-width: 150px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trail-pin {
+  flex: none;
+  width: 20px; height: 20px;
+  border: 0;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.trail-pin.is-pinned { color: #e6bf59; }
+.trail-footnote { padding-top: 8px; text-align: center; }
+
+/* 右键菜单走系统原生渲染，Windows 侧只能自绘：面板渐变在 .92~.95，菜单要压过它就得给一档实底 */
+.trail-menu {
+  position: fixed;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 168px;
+  padding: 4px;
+  background: rgba(38, 41, 50, .96);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+}
+.trail-menu[hidden] { display: none; }
+.trail-menu button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.trail-menu button:hover { background: rgba(255, 255, 255, .10); color: var(--text); }
+
+/* 防休眠右键菜单（KA:132-153）：借 .trail-menu 的菜单底，加分隔线、勾选列与破坏性项 */
+.ka-menu { min-width: 150px; }
+.ka-menu button { display: flex; align-items: center; gap: 6px; }
+/* display:flex 会盖掉 [hidden] 的默认 display:none，「关闭防休眠」这类按需项必须自己再关一次 */
+.ka-menu button[hidden] { display: none; }
+.ka-menu .ka-ico { flex: none; width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.ka-menu .ka-check { flex: none; width: 11px; text-align: center; font-size: 10px; line-height: 1; }
+.ka-menu button.is-on .ka-check::before { content: "\2713"; }
+.ka-sep { height: 1px; margin: 3px 6px; background: var(--line); }
+
+/* ---- 额度轨迹（对应 QuotaHistoryView.swift 的排版尺寸） ---- */
+/* 字号取 Swift 侧 Theme.fontSize 的原值，面板变宽到 640 才能放平控制行与图表 */
+.curve { display: flex; flex-direction: column; gap: 13px; }
+/* 宽页（640）放得下整行；万一窗口没能变宽，标题不缩、跨度选择器换行，别让控件被推出窗外 */
+.curve-controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; }
+.curve-controls .curve-titles { display: flex; flex: none; flex-direction: column; gap: 2px; }
+.curve-title { font-size: 14px; font-weight: 700; }
+.curve-sub { font-size: 9.5px; color: var(--text-3); }
+.curve-controls .segmented { flex: none; margin: 0 0 0 auto; }
+/* 段距沿用 .segmented 的 flex:1：宽度按 164/216 的档位平分，压成 flex:none 会让标签缩到只剩几个像素 */
+.curve-controls .seg { padding: 3px 0; font-size: 10px; }
+.curve-tool { width: 164px; }
+.curve-span { width: 216px; }
+/* 对应 QuotaHistoryView 里的 Card(tint:)：和用量卡同一套表面（黑 .26 + tint .08 +
+   顶部白 .05 渐隐 + tint 渐变描边），不是描边实色盒 */
+.curve-card {
+  --tint: #eb8566;
+  position: relative;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 13px;
+  border: 0;
+  border-radius: 16px;
+  background:
+    linear-gradient(to bottom, rgba(255, 255, 255, .05), rgba(255, 255, 255, 0) 50%),
+    color-mix(in srgb, var(--tint) 8%, transparent),
+    rgba(0, 0, 0, .26);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, .30);
+}
+.curve-summary { display: flex; align-items: flex-start; gap: 13px; }
+.curve-stat { display: flex; flex-direction: column; gap: 3px; }
+.curve-stat span { font-size: 9.5px; color: var(--text-3); }
+.curve-stat strong { font-size: 15px; font-weight: 700; font-family: var(--num); }
+.curve-largest { margin-left: auto; align-items: flex-end; text-align: right; }
+.curve-mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+.curve-section { display: flex; flex-direction: column; gap: 8px; }
+.curve-section-title { font-size: 12px; font-weight: 700; }
+.curve-legend { display: flex; justify-content: flex-end; gap: 10px; font-size: 9.5px; color: var(--text-2); }
+.curve-plot { position: relative; }
+.curve-plot svg { display: block; }
+.curve-guide { position: absolute; width: 1px; background: rgba(255, 255, 255, .32); pointer-events: none; }
+.curve-bubble {
+  position: absolute;
+  width: 154px;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 6px 7px;
+  border: 0.75px solid rgba(255, 255, 255, .14);
+  border-radius: 7px;
+  background: rgba(26, 28, 36, .96);
+  box-shadow: 0 5px 12px rgba(0, 0, 0, .32);
+  pointer-events: none;
+}
+/* 上面的 display:flex 会盖掉浏览器的 [hidden]（作者样式优先于 UA 样式），
+   不补这一条的话未悬停时气泡会以空盒子压在图左上角。.trail-menu 同理。 */
+.curve-bubble[hidden] { display: none; }
+.curve-bubble time { font-size: 9.5px; font-weight: 600; }
+.curve-bubble .curve-brow { display: flex; align-items: center; gap: 4px; font-size: 9px; color: var(--text-2); }
+.curve-bubble .curve-brow strong { margin-left: auto; font-size: 9.5px; font-weight: 600; color: var(--text); }
+.curve-bubble .curve-bact { font-size: 8.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.curve-dot { width: 5px; height: 5px; border-radius: 50%; flex: none; }
+.curve-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  height: 210px; text-align: center;
+}
+.curve-empty .curve-empty-mark { font-size: 24px; opacity: .8; }
+.curve-empty strong { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.curve-empty p { font-size: 10px; color: var(--text-3); margin: 0; max-width: 320px; }
+.curve-rows { display: grid; gap: 8px; align-items: center; }
+.curve-time { width: 40px; font-size: 9.5px; color: var(--text-3); }
+.curve-window { font-size: 9.5px; font-weight: 600; line-height: 1.15; min-width: 42px; }
+.curve-value { font-size: 10.5px; font-weight: 600; text-align: right; }
+.curve-duration { font-size: 9.5px; color: var(--text-3); white-space: nowrap; }
+.curve-activity { font-size: 9.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.curve-daily-bar { position: relative; height: 7px; border-radius: 999px; }
+.curve-daily-bar i { position: absolute; left: 0; top: 0; height: 100%; border-radius: 999px; }
+.curve-refill { font-size: 9px; color: var(--text-3); white-space: nowrap; }
+.curve-footnote { font-size: 9.5px; color: var(--text-3); line-height: 1.45; }
+/* 图例 18 + 间距 6 + 画布 211：先按这个最终高度占位，量到宽度再填图 */
+.curve-slot { height: 235px; }
+
+/* ---- 周额度周期卡（QuotaHistoryView.swift:174-463） ---- */
+/* 一节 = 标题行 + 每个工具一块 Card，节内间距 10、卡片纵向靠 .curve 的 13 排开 */
+.cycle-section { display: flex; flex-direction: column; gap: 10px; }
+.cycle-header { display: flex; align-items: flex-start; gap: 10px; }
+.cycle-header .cycle-titles { display: flex; flex-direction: column; gap: 2px; }
+.cycle-title { font-size: 14px; font-weight: 700; color: var(--ui-1); }
+.cycle-sub { font-size: 9.5px; color: var(--ui-3); }
+.cycle-header .cycle-filter { flex: none; margin-left: auto; }
+.cycle-filter .seg { padding: 3px 0; font-size: 10px; }
+/* cyclePlaceholder：Card(tint: codex) 里一行居中、58 点高，盒子由 .curve-card 出 */
+.cycle-placeholder {
+  display: flex; align-items: center; justify-content: center;
+  height: 58px;
+  font-size: 11px; color: var(--text-3); text-align: center;
+}
+.cycle-missing { font-size: 9px; color: var(--text-3); line-height: 1.45; margin: 0; }
+/* 当前周期 + 分隔线 + 过去几个周期，同一张 Card 里 spacing 12 */
+.cycle-group { display: flex; flex-direction: column; gap: 12px; }
+.cycle-divider { height: 1px; background: color-mix(in srgb, var(--tint) 18%, transparent); }
+.cycle-card { display: flex; flex-direction: column; gap: 9px; }
+.cycle-top { display: flex; align-items: baseline; gap: 8px; }
+.cycle-top strong { font-size: 12px; font-weight: 700; }
+.cycle-top span { margin-left: auto; font-size: 9.5px; color: var(--text-3); white-space: nowrap; }
+/* cycleProgress：胶囊轨道吃满，右侧「已用 N%」按 62 点起留位 */
+.cycle-progress { display: flex; align-items: center; gap: 8px; }
+.cycle-track {
+  position: relative; flex: 1 1 auto; height: 7px; border-radius: 999px;
+  background: rgba(255, 255, 255, .08); overflow: hidden;
+}
+.cycle-track i { position: absolute; left: 0; top: 0; height: 100%; border-radius: 999px; opacity: .85; }
+.cycle-used {
+  font-size: 10px; font-weight: 600; color: var(--text-2); min-width: 62px;
+  text-align: right; white-space: nowrap;
+}
+/* token 区块：左边已用量、右边外推值，两侧都是 spacing 2 的一竖排 */
+.cycle-tokens { display: flex; align-items: baseline; gap: 8px; }
+.cycle-used-block { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cycle-used-block > span { font-size: 9.5px; color: var(--text-3); }
+.cycle-big { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.cycle-big strong {
+  font-size: 25px; font-weight: 700; font-family: var(--num);
+  color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cycle-unit { font-size: 10px; color: var(--text-3); }
+.cycle-grouped { font-size: 9.5px; color: var(--text-3); }
+.cycle-project { display: flex; flex-direction: column; gap: 2px; margin-left: auto; text-align: right; }
+.cycle-project > span { font-size: 9.5px; color: var(--text-3); }
+.cycle-project strong {
+  font-size: 17px; font-weight: 700; font-family: var(--num);
+  color: var(--text-2); white-space: nowrap;
+}
+.cycle-devices {
+  font-size: 9px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* completedCyclesSection：标题 11 semibold，行内五列（92 / 38 / 吃满 / 52 / 用到%） */
+.cycle-history { display: flex; flex-direction: column; gap: 6px; }
+.cycle-history > strong { font-size: 11px; font-weight: 600; color: var(--text-2); }
+.cycle-uneven { font-size: 9px; color: var(--text-3); line-height: 1.45; margin: 0; }
+.cycle-row {
+  display: grid; align-items: center; gap: 8px;
+  grid-template-columns: 92px 38px minmax(0, 1fr) 52px auto;
+}
+.cycle-range { font-size: 9.5px; color: var(--text-3); white-space: nowrap; }
+.cycle-length { font-size: 9.5px; color: var(--text-3); text-align: right; }
+/* 更早周期的条只有实心那一截：Swift 那边是裸 Capsule，没有 .cycle-track 那样的底槽 */
+.cycle-bar { position: relative; height: 7px; }
+.cycle-bar i {
+  position: absolute; left: 0; top: 0; height: 100%; border-radius: 999px;
+  background: color-mix(in srgb, var(--tint) 55%, transparent);
+}
+.cycle-tokens-value {
+  font-size: 11px; font-weight: 600; font-family: var(--num);
+  color: var(--text-2); text-align: right; white-space: nowrap;
+}
+/* 「用到」那一列按最宽的「用到100%」定尺：写死 52 会把「用到100%」自己截断 */
+.cycle-pct { display: grid; min-width: 52px; }
+.cycle-pct > span { grid-area: 1 / 1; font-size: 9px; color: var(--text-3); text-align: right; white-space: nowrap; }
+.cycle-pct > span:first-child { visibility: hidden; }
+.cycle-more {
+  display: flex; align-items: center; gap: 5px; margin-top: 2px;
+  padding: 0; border: 0; background: transparent; cursor: pointer;
+  font: inherit; font-size: 9.5px; font-weight: 600;
+  color: color-mix(in srgb, var(--tint) 90%, transparent);
+}
+.cycle-more svg { flex: none; width: 9px; height: 9px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ---- 长跨度的每日真实消耗（QuotaHistoryView.swift:465-528 + QuotaDailyChart） ---- */
+.daily-wrap { display: flex; flex-direction: column; gap: 12px; }
+.daily-stats { display: flex; align-items: flex-start; gap: 12px; }
+.daily-stat { display: flex; flex: 1 1 0; min-width: 0; flex-direction: column; gap: 3px; }
+.daily-stat > span { font-size: 9.5px; color: var(--text-3); }
+.daily-stat > strong {
+  font-size: 19px; font-weight: 700; font-family: var(--num);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.daily-exact { font-size: 9px; color: var(--text-3); }
+.daily-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  height: 210px;
+}
+.daily-empty svg {
+  width: 24px; height: 24px; fill: none; stroke: var(--tint); stroke-width: 1.4;
+  opacity: .8;
+}
+.daily-empty .fill { fill: var(--tint); stroke: none; }
+.daily-empty strong { font-size: 12px; font-weight: 600; color: var(--text-2); }
+/* 每日气泡：宽 150，贴在绘图区左上角，不跟光标夹取（Swift:562 的 offset） */
+.daily-bubble { width: 150px; }
+.daily-sum { font-size: 8.5px; color: var(--text-3); }
+
+
+/* ---- 用量页卡片（续）：按模型披露 / 卡内额度行 / 状态块 / 空态 / footer ---- */
+
+/* 「按模型 (N)」披露：按钮 + 展开面板（圆角 7、pad10、底 primary .05） */
+.disc {
+  display: flex; align-items: center; gap: 5px; width: 100%;
+  padding: 0; border: 0; background: transparent; cursor: pointer;
+}
+.disc svg { flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.disc .pie { width: 9px; height: 9px; color: var(--tint); fill: currentColor; stroke: none; }
+.disc .label { font-size: 11px; font-weight: 500; color: var(--ui-2); }
+.disc .chev { width: 8px; height: 8px; color: var(--ui-3); stroke-width: 2; }
+.disc-panel { display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 7px; background: rgba(255, 255, 255, .05); }
+.disc-title { font-size: 11px; font-weight: 600; color: var(--ui-2); }
+
+/* 披露展开动效：PV:2148/2248 用 withAnimation(.easeInOut(0.2))，明细胶囊 PV:2357 是 opacity + move(edge:.top)。
+   整页靠 innerHTML 重建，CSS 只在元素插入时跑一次动画，所以只有用户点开的那一帧挂 .anim-in，数据推送不会重播。 */
+.anim-in { animation: disc-in .2s ease-out; }
+@keyframes disc-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+/* 系统开了「减少动态效果」时 macOS 也不播动画 */
+@media (prefers-reduced-motion: reduce) { .anim-in { animation: none; } }
+
+/* Codex 重置卡披露：对应 PV:814-881，行内 HStack(spacing 6)、面板 spacing 7 / pad 9 / r7 / primary .05 */
+.disc.is-reset { gap: 6px; }
+.reset-ic { flex: none; width: 10px; height: 10px; color: var(--tint); stroke-width: 1.6; }
+.reset-name { flex: none; font-size: 11px; color: var(--ui-2); }
+.reset-count { flex: none; font-size: 10px; font-weight: 600; font-family: var(--mono); color: var(--ui-1); }
+.reset-nearest { font-size: 9.5px; font-family: var(--mono); color: var(--ui-3);
+  min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.disc.is-reset .filler { min-width: 6px; }
+.reset-panel { display: flex; flex-direction: column; gap: 7px; padding: 9px; border-radius: 7px; background: rgba(255, 255, 255, .05); }
+.reset-head { display: flex; align-items: center; }
+.reset-head .rh-title { font-size: 9.5px; font-weight: 500; color: var(--ui-3); }
+.reset-head .rh-tz { font-size: 9px; font-family: var(--mono); color: var(--ui-3); }
+.reset-item { display: flex; align-items: center; gap: 7px; }
+.reset-idx { flex: none; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 50%;
+  font-size: 9px; font-weight: 600; font-family: var(--mono); color: var(--tint);
+  background: color-mix(in srgb, var(--tint) 14%, transparent); }
+.reset-kind { flex: none; font-size: 10.5px; font-weight: 500; color: var(--ui-2); }
+/* SwiftUI 的 Text 在空间不足时是截断不是换行，这里两行都用省略号复现 */
+.reset-time { font-size: 9.5px; font-family: var(--mono); color: var(--ui-1);
+  min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mrow {
+  display: flex; align-items: flex-start; gap: 7px; width: 100%;
+  padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left;
+}
+.mrow.is-clickable { cursor: pointer; }
+.mrow .chevbox { flex: none; width: 8px; height: 16px; display: grid; place-items: center; color: var(--ui-3); font-size: 8px; font-weight: 700; }
+.mrow .chevbox svg { width: 7px; height: 7px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.mrow .mdot { flex: none; width: 5px; height: 5px; margin-top: 5px; border-radius: 50%; background: color-mix(in srgb, var(--tint) 70%, transparent); }
+.mrow .mname {
+  flex: 1; min-width: 0; font-size: 11.5px; line-height: 1.25; color: var(--ui-1);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.mrow .mright { flex: none; display: flex; align-items: baseline; gap: 6px; margin-left: 6px; }
+.m-total { font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); white-space: nowrap; }
+.m-hit {
+  font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); white-space: nowrap;
+  padding: 1px 4px; border-radius: 999px; background: rgba(255, 255, 255, .06);
+}
+.m-cost { font-size: 11.5px; font-weight: 600; font-family: var(--mono); color: var(--ui-1); white-space: nowrap; }
+/* 展开后的明细：缩进 20（chevron 8 + 间距 7 + 圆点 5）+ 4 的流式间距 */
+.m-detail { margin-left: 20px; display: flex; flex-wrap: wrap; gap: 4px; padding: 5px 0 2px; }
+.tag {
+  display: inline-flex; align-items: center; gap: 3px; padding: 2.5px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--tint) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tint) 18%, transparent);
+}
+.tag .l { font-size: 8.5px; color: var(--ui-3); }
+.tag .v { font-size: 9px; font-family: var(--mono); color: var(--ui-2); white-space: nowrap; }
+.tag.price { gap: 2px; background: color-mix(in srgb, var(--tint) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tint) 25%, transparent); }
+.tag.price .v, .tag.price .cur { color: var(--tint); }
+.tag.price .sep { color: color-mix(in srgb, var(--tint) 60%, transparent); }
+
+/* 卡内额度行：quotaRow + MiniBar（填充最窄 3px，轨道 primary .09、高 5） */
+.q-row { display: flex; flex-direction: column; gap: 4px; }
+.q-row.is-stale { opacity: .65; }
+.q-top { display: flex; align-items: baseline; gap: 6px; }
+.q-title { font-size: 11px; color: var(--ui-2); }
+.q-detail { font-size: 10px; font-family: var(--mono); color: var(--ui-3); }
+.q-top .filler { flex: 1; min-width: 6px; }
+.q-value { font-size: 12px; font-weight: 600; font-family: var(--mono); color: var(--ui-1); white-space: nowrap; }
+.q-row.is-low .q-value { color: #ff453f; }
+.q-row.is-stale .q-value { color: var(--ui-3); }
+.q-reset { font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); white-space: nowrap; }
+.q-done { font-size: 11px; font-weight: 600; color: var(--ui-3); }
+.q-bar { height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .09); }
+.q-bar i {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--tint) 82%, #fff), var(--tint));
+}
+.q-row.is-low .q-bar i { background: linear-gradient(to bottom, #ff6b66, #ff453f); }
+.q-row.is-stale .q-bar i { background: color-mix(in srgb, var(--tint) 40%, transparent); }
+
+/* Grok 分产品占用：PV:1414-1430，VStack(spacing 4) + 名称 11 二级 / 数值 12 semibold mono 一级 + MiniBar */
+.share-row { display: flex; flex-direction: column; gap: 4px; }
+.sh-top { display: flex; align-items: baseline; gap: 6px; }
+.sh-name { font-size: 11px; color: var(--ui-2); min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sh-top .filler { flex: 1; min-width: 6px; }
+.sh-value { font-size: 12px; font-weight: 600; font-family: var(--mono); color: var(--ui-1); white-space: nowrap; }
+/* PV:1427：分产品的 MiniBar 用 tint.opacity(0.75)，比主额度条淡一档 */
+.share-row .q-bar i { opacity: .75; }
+
+/* 千问办公：用尽提示（PV:1440-1446）与「个人积分明细」段标题（PV:1476-1478） */
+.q-over { display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 600; color: rgba(255, 69, 63, .92); }
+.q-over svg { flex: none; width: 10px; height: 10px; fill: currentColor; stroke: none; }
+.q-sec-title { font-size: 10px; font-weight: 600; color: var(--ui-2); }
+/* 个人积分明细行（PV:1504-1545）：与共享包同族，但行距 4、标题 11 常规体、上下各 1pt 内衬 */
+.q-seg { display: flex; flex-direction: column; gap: 4px; padding: 1px 0; }
+.qs-title.is-seg { font-size: 11px; font-weight: 400; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* 日期行（PV:1586-1595）：明细行的续期/到期与共享包到期共用 */
+.q-date { display: flex; align-items: center; gap: 5px; font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); }
+.q-date svg { flex: none; width: 8.5px; height: 8.5px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+.q-shared { display: flex; flex-direction: column; gap: 5px; }
+.qs-head { display: flex; align-items: baseline; gap: 6px; }
+.qs-title { font-size: 10px; font-weight: 600; color: var(--ui-2); }
+.qs-head .filler { flex: 1; min-width: 6px; }
+.qs-left { font-size: 11px; font-weight: 600; font-family: var(--mono); color: var(--ui-1); white-space: nowrap; }
+/* p 没有全局 margin 复位，这里必须自己清掉，否则默认 1em 会把 5 的行距顶歪 */
+.qs-note { font-size: 8.5px; color: var(--ui-3); margin: 0; }
+.qs-used { font-size: 9px; font-family: var(--mono); color: var(--ui-3); margin: 0; }
+.qs-bar { display: flex; align-items: center; gap: 6px; }
+.qs-bar .q-bar { flex: 1; }
+.qs-pct { font-size: 9.5px; font-weight: 600; font-family: var(--mono); color: var(--ui-2); white-space: nowrap; }
+.qs-pct.is-low { color: #ff453f; }
+.q-bar i.is-low { background: linear-gradient(to bottom, #ff6b66, #ff453f); }
+
+/* Provider 联网额度模板：PV:1062-1144，各段是卡片 VStack(spacing 11) 的兄弟节点 */
+.pq-head { display: flex; align-items: center; gap: 6px; }
+.p-pill {
+  font-size: 9.5px; font-weight: 600; font-family: var(--mono); color: var(--ui-2);
+  padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--tint) 16%, transparent);
+  white-space: nowrap;
+}
+/* macOS 是 truncationMode(.middle)，CSS 只能尾部省略；账号一般在末尾更有辨识度，先按尾部截 */
+.pq-account { font-size: 9px; font-family: var(--mono); color: var(--ui-3); min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pq-head .filler { flex: 1; min-width: 0; }
+.pq-unknown { display: flex; align-items: baseline; gap: 6px; }
+.pq-unknown .filler { flex: 1; min-width: 6px; }
+.pq-note { font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); text-align: right; }
+.pq-details { display: flex; flex-direction: column; gap: 6px; }
+.pd-row { display: flex; align-items: baseline; gap: 8px; }
+.pd-row .filler { flex: 1; min-width: 8px; }
+.pd-label { font-size: 10px; color: var(--ui-3); }
+.pd-right { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.pd-value { font-size: 10px; font-weight: 600; font-family: var(--mono); color: var(--ui-1); }
+.pd-second { font-size: 8.5px; font-family: var(--mono); color: var(--ui-3); text-align: right; }
+.pq-stamp { display: flex; align-items: center; gap: 5px; font-size: 9px; font-family: var(--mono); color: var(--ui-3); }
+.pq-stamp svg { flex: none; width: 8.5px; height: 8.5px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+
+/* 额度落款：「额度更新 · …」/「上次读到 · …」 */
+.q-stamp { display: flex; align-items: center; gap: 5px; font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); }
+.q-stamp svg { flex: none; width: 9px; height: 9px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+/* 实心变体：q-stamp 默认把整只图标描边化，.fill 需要换回填充才画得出 macOS 的警告实心三角 */
+.q-stamp .fill { fill: currentColor; stroke: none; }
+/* PV:1612：缓存过期时整行转橙色（systemOrange .88） */
+.q-stamp.is-warn { color: rgba(255, 159, 10, .88); }
+
+/* quotaStateNotice：状态色底 .07 + 描边 .16 的提示块 */
+.notice {
+  display: flex; flex-direction: column; gap: 6px; padding: 9px; border-radius: 9px;
+  background: color-mix(in srgb, var(--tint) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tint) 16%, transparent);
+}
+.notice .nt { display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: color-mix(in srgb, var(--tint) 95%, transparent); }
+.notice .nt svg { flex: none; width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.notice .nd { font-size: 9.5px; color: var(--ui-2); }
+.notice .ns { display: flex; align-items: center; gap: 5px; font-size: 9px; font-family: var(--mono); color: var(--ui-3); }
+.notice .ns svg { width: 8.5px; height: 8.5px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+
+/* plan / model 胶囊行 */
+.badge-row { display: flex; align-items: center; }
+.badge-row .bl { font-size: 11px; color: var(--ui-3); }
+.badge-row .filler { flex: 1; min-width: 8px; }
+.badge-row .bv {
+  font-size: 10px; font-weight: 600; font-family: var(--mono); color: var(--ui-2);
+  padding: 2px 7px; border-radius: 999px; background: color-mix(in srgb, var(--tint) 16%, transparent);
+  max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 空态：emptyHint / usageEmptyHint / 长提示文案 */
+.hint-empty { font-size: 10px; color: var(--ui-3); }
+.hint-stack { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--ui-3); }
+.hint-wrap { font-size: 10px; color: var(--ui-3); }
+
+/* 整页加载 / 出错：HStack(spacing:8) 撑 90pt 高 */
+.page-state { display: flex; align-items: center; justify-content: center; gap: 8px; height: 90px; }
+.page-state svg { flex: none; width: 13px; height: 13px; color: #eb8566; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.page-state .msg { font-size: 12px; font-weight: 500; color: var(--ui-2); }
+.page-state .spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, .18); border-top-color: var(--ui-2); animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* inactiveToolsLine：字号 9、三级色；SwiftUI 的 frame(maxWidth:.infinity) 默认居中 */
+.idle-line { margin: 0; text-align: center; font-size: 9px; color: var(--ui-3); }
+
+/* footer：disclaimer + 复制图片 + 刷新 + 退出（IconButton：pad 4/9、圆角 7） */
+.panel-foot { display: flex; align-items: center; gap: 4px; }
+.disclaimer { font-size: 9px; color: var(--ui-3); }
+.foot-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 9px; border: 0; border-radius: 7px;
+  /* 行高钉死：按钮的 line-height:normal 会按文字脚本变（「防休眠」24、「∞」20），
+     SwiftUI 那边是 11pt 字号的固定行高，切换开关时高度不该跳。 */
+  line-height: 16px;
+  background: transparent; color: var(--ui-2); font-size: 11px; font-weight: 500; cursor: pointer;
+}
+.foot-btn svg { flex: none; width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.foot-btn:hover { background: rgba(255, 255, 255, .10); color: var(--ui-1); }
+.foot-btn.is-done { color: #eb8566; }
+/* 咖啡钮（KA:112-131）：原版是 .plain 样式、没有 hover 底，开启时换成 Theme.claude 前景 + claude .14 底 */
+.ka-btn:hover { background: transparent; color: var(--ui-2); }
+.ka-btn.is-on { color: #eb8566; background: rgba(235, 133, 102, .14); }
+.ka-btn.is-on:hover { color: #eb8566; background: rgba(235, 133, 102, .14); }
+.ka-btn.is-on .cup-body { fill: currentColor; }
+/* 破坏性项：macOS 的 role:.destructive 是 systemRed，hover 也不能变回白 */
+.ka-menu button.ka-stop { color: rgba(255, 69, 67, .92); }
+.ka-menu button.ka-stop:hover { color: rgba(255, 69, 67, .92); }
+
+/* 项目页搜索行右侧的小刷新钮：对应 PTV:77-86 的 24×24 圆底 primary .06 + 10 medium tertiary */
+.icon-btn {
+  width: 24px; height: 24px; padding: 0;
+  border: 0; border-radius: 50%;
+  background: var(--fill-6); color: var(--ui-3);
+  font-size: 10px; font-weight: 500; cursor: pointer;
+}
+.icon-btn:hover { background: rgba(255, 255, 255, .08); color: var(--ui-1); }
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: #2f2f3a; border-radius: 4px; }
+
+/* ==== 数据面板（DashboardView.swift + WrappedView.swift） ====
+   字号按 Swift 的 Theme.fontSize(N) 原值（PanelFontSize 默认 1.0 档），
+   每块的 spacing / padding / 圆角都逐条对着 SwiftUI 的量抄下来。 */
+.dash {
+  --claude: #eb8566;
+  --grad-claude: linear-gradient(to bottom, color-mix(in srgb, var(--claude) 82%, #fff), var(--claude));
+  position: relative;
+  display: flex; flex-direction: column; gap: 14px; align-items: stretch;
+}
+.page-state.is-tall { height: 200px; }
+
+.dw-wrapped { position: relative; display: flex; flex-direction: column; gap: 12px; }
+.dw-block { display: flex; flex-direction: column; gap: 9px; }
+.dw-heat { gap: 8px; }
+.dw-title { margin: 0; font-size: 13px; font-weight: 700; color: var(--ui-1); }
+.dw-sub { margin: 0; font-size: 9px; color: var(--ui-3); }
+.dw-hidden-line { margin: 0; font-size: 10px; color: var(--ui-3); }
+
+/* ---- 撒花（ConfettiView）：overlay 220 高、不吃点击，30 片从 -40 落到 260 ---- */
+.dw-confetti {
+  position: absolute; top: 0; left: 0; right: 0; height: 220px; z-index: 3;
+  overflow: hidden; pointer-events: none;
+}
+.dw-confetti i {
+  position: absolute; top: -40px; left: var(--x); width: 6px; height: 9px; border-radius: 1.5px;
+  animation: dw-fall var(--dur) ease-in var(--dly) forwards;
+}
+@keyframes dw-fall {
+  from { transform: translate3d(0, 0, 0) rotate(var(--rot)); opacity: 1; }
+  to { transform: translate3d(0, 300px, 0) rotate(var(--rot)); opacity: 0; }
+}
+
+/* ---- hero（WrappedView.swift:113-157）---- */
+.dw-hero {
+  display: flex; flex-direction: column; gap: 5px; align-items: flex-start;
+  width: 100%; padding: 14px; border-radius: 16px;
+  background: linear-gradient(135deg,
+    color-mix(in srgb, var(--claude) 16%, transparent),
+    color-mix(in srgb, #9e85eb 6%, transparent));
+  box-shadow: inset 0 0 0 .75px color-mix(in srgb, var(--claude) 12%, transparent);
+}
+.dw-hero-top { display: flex; align-items: center; gap: 5px; width: 100%; }
+.dw-spark { flex: none; display: flex; color: var(--claude); }
+.dw-spark svg { width: 11px; height: 11px; fill: currentColor; stroke: none; }
+.dw-kicker { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--ui-2); }
+.dw-since-row { display: flex; align-items: center; gap: 4px; }
+.dw-since { font-size: 9px; font-family: var(--mono); color: var(--ui-3); }
+.dw-total { display: flex; align-items: baseline; gap: 6px; }
+.dw-big {
+  font-size: 32px; font-weight: 800; line-height: 1.1; font-family: var(--num);
+  background: linear-gradient(to right, var(--claude), #9e85eb);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.dw-unit { font-size: 10.5px; color: var(--ui-3); }
+.dw-fun { margin: 0; font-size: 9.5px; color: rgba(255, 255, 255, .7); }
+
+/* 区间胶囊（periodPicker:313-338）：外框 2 内边距的胶囊，选中那枚铺 claude 渐变 */
+.dw-period { display: flex; gap: 0; padding: 2px; border-radius: 999px; background: var(--fill-6); }
+.dw-capsule {
+  padding: 3px 7px; border: 0; border-radius: 999px; background: transparent;
+  font-size: 9px; font-weight: 500; color: var(--ui-3); cursor: pointer; white-space: nowrap;
+}
+.dw-capsule.is-active { font-weight: 700; color: #fff; background: var(--grad-claude); }
+
+/* ---- 五枚指标胶囊（statChips:160-188）---- */
+.dw-chips { display: flex; gap: 7px; }
+.dw-chip {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+  padding: 7px 9px; border-radius: 11px;
+  background: color-mix(in srgb, var(--tint) 10%, transparent);
+}
+.dw-chip-label { font-size: 9px; font-weight: 500; color: color-mix(in srgb, var(--tint) 90%, transparent); }
+.dw-chip-value { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.dw-chip-value b {
+  font-size: 12.5px; font-weight: 700; font-family: var(--num); color: #fff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 对应 lineLimit(1) + minimumScaleFactor(0.6)：先降号到 0.6 档，还是放不下才省略号 */
+.dw-chip-value b.is-tight { font-size: 10.5px; }
+.dw-chip-value b.is-tighter { font-size: 7.5px; }
+.dw-chip-ic { flex: none; width: 10px; height: 10px; color: var(--tint); }
+.dw-chip-ic svg { display: block; width: 10px; height: 10px; fill: currentColor; stroke: none; }
+
+/* ---- 巅峰日（peakDaysSection:232-268）---- */
+.dw-peak-list { display: flex; flex-direction: column; gap: 5px; }
+.dw-peak {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 6px 9px; border-radius: 10px; background: var(--fill-5);
+}
+.dw-peak > .filler { min-width: 6px; }
+.dw-rank {
+  flex: none; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; font-size: 10px; font-weight: 700; font-family: var(--num); color: #fff;
+  background: rgba(255, 255, 255, .14);
+}
+.dw-rank.is-first { background: var(--grad-claude); }
+.dw-peak-date { flex: none; font-size: 11.5px; font-weight: 600; color: var(--ui-1); white-space: nowrap; }
+.dw-peak-tok { flex: none; font-size: 9.5px; font-family: var(--mono); color: var(--ui-2); }
+.dw-peak-projs {
+  min-width: 0; font-size: 9px; color: var(--ui-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ---- 成就（achievementsSection:191-228 + BadgeView:360-411）---- */
+.dw-ach-head { display: flex; align-items: center; gap: 5px; }
+.dw-count {
+  font-size: 9.5px; font-weight: 700; font-family: var(--num); color: var(--claude);
+  padding: 1px 5px; border-radius: 999px; background: color-mix(in srgb, var(--claude) 14%, transparent);
+}
+.dw-more {
+  display: flex; align-items: center; gap: 3px; padding: 0; border: 0; background: none;
+  font-size: 10px; font-weight: 500; color: var(--ui-3); cursor: pointer;
+}
+.dw-more-ic { width: 8px; height: 8px; stroke-width: 2.2; }
+.dw-ach-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.dw-badge {
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 7px 9px; border-radius: 10px; background: var(--fill-5);
+}
+.dw-badge-ic {
+  flex: none; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; color: #fff;
+  background: linear-gradient(135deg, var(--claude), color-mix(in srgb, var(--claude) 60%, transparent));
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--claude) 40%, transparent), inset 0 0 0 .5px rgba(255, 255, 255, .22);
+}
+.dw-badge-ic svg { width: 12px; height: 12px; fill: currentColor; stroke: currentColor; stroke-width: 1.2; }
+.dw-badge-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.dw-badge-txt strong { font-size: 11.5px; font-weight: 700; color: var(--ui-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dw-badge-txt em { font-size: 9px; font-style: normal; color: var(--ui-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 新解锁：金光从左扫到右（.8s easeInOut）+ 弹入（spring response .45 / damping .5），按序延迟 */
+.dw-badge.is-new::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 45%;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, .55), transparent);
+  mix-blend-mode: plus-lighter; pointer-events: none;
+  transform: translateX(-290%);
+  animation: dw-shimmer .8s ease-in-out var(--delay) forwards;
+}
+@keyframes dw-shimmer { to { transform: translateX(290%); } }
+.dw-badge.is-new { animation: dw-pop .45s cubic-bezier(.3, 1.6, .5, 1) var(--delay) both; }
+@keyframes dw-pop { from { transform: scale(.7); } to { transform: scale(1); } }
+
+/* ---- 活跃时段（rhythmSection:278-310）与热力标题行 ---- */
+.dw-rhythm-head { display: flex; align-items: center; gap: 8px; }
+.dw-peak-label { font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); }
+.dw-hours { display: flex; align-items: flex-end; gap: 2px; height: 48px; }
+.dw-hour { flex: 1; min-width: 0; border-radius: 2px; background: color-mix(in srgb, var(--claude) 32%, transparent); }
+.dw-hour.is-peak { background: var(--grad-claude); }
+.dw-hour-axis { display: flex; align-items: center; }
+.dw-hour-tick { font-size: 8px; font-family: var(--mono); color: var(--ui-3); }
+
+/* ---- StatBar（Design.swift:212-239）---- */
+.stat-bar { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.sb-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sb-name { flex: 1; min-width: 0; font-size: 11px; font-weight: 500; color: var(--ui-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-right { display: flex; align-items: center; gap: 6px; flex: none; margin-left: 8px; }
+.sb-tok { font-size: 9.5px; font-family: var(--mono); color: var(--ui-3); }
+.sb-cost { font-size: 10px; font-weight: 600; font-family: var(--mono); color: var(--ui-2); }
+.sb-bar {
+  display: block; height: 5px; min-width: 5px; border-radius: 999px;
+  background: linear-gradient(to right, color-mix(in srgb, var(--tint) 50%, transparent), var(--tint));
+}
+
+/* ---- 项目排行的眼钮（projectsSection:444-470）---- */
+.dw-eye-head {
+  display: flex; align-items: center; gap: 5px; width: 100%; padding: 0; border: 0; background: none;
+  color: var(--ui-3); cursor: pointer; text-align: left;
+}
+.dw-eye-ic { flex: none; width: 9px; height: 9px; stroke-width: 1.5; }
+.dw-eye-body { display: flex; flex-direction: column; gap: 9px; }
+
+/* ---- 活跃热力（heatmapSection:474-658）---- */
+.heat-seg { width: 120px; flex: none; }
+.heat-week, .heat-grid { display: flex; align-items: flex-start; gap: 4px; }
+.heat-labels { display: flex; flex-direction: column; gap: 2px; flex: none; }
+.heat-labels.is-big { gap: 3px; }
+.heat-label { display: flex; align-items: center; width: 16px; height: 12px; font-size: 8px; font-weight: 500; color: var(--ui-3); }
+.heat-label.is-week { width: 14px; height: 20px; font-size: 8px; }
+.heat-label.is-big { height: 20px; font-size: 10px; }
+.heat-week-rows { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.heat-wrow { display: flex; align-items: center; gap: 6px; height: 20px; min-width: 0; }
+.heat-cell.heat-wcell { width: 20px; height: 20px; border-radius: 3px; }
+.heat-wdate { flex: none; width: 38px; font-size: 9px; font-family: var(--mono); color: var(--ui-3); }
+.heat-wcost { font-size: 10px; font-weight: 600; font-family: var(--mono); color: var(--ui-2); white-space: nowrap; }
+.heat-scroll { flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.heat-scroll::-webkit-scrollbar { display: none; }
+.heat-cols { display: flex; gap: 2px; }
+.heat-col { display: flex; flex-direction: column; gap: 2px; }
+.heat-cell { flex: none; width: 12px; height: 12px; border-radius: 2.5px; cursor: pointer; }
+.heat-cols.is-big, .heat-col.is-big { gap: 3px; }
+.heat-cell.is-big { width: 20px; height: 20px; border-radius: 4px; }
+.heat-cell:not([data-heat-cell]) { cursor: default; }
+.heat-cell.is-sel { box-shadow: inset 0 0 0 2px var(--claude); }
+.heat-wcell.is-sel { box-shadow: inset 0 0 0 1.5px var(--claude); }
+.heat-legend { display: flex; align-items: center; gap: 5px; }
+.heat-few { font-size: 10px; color: var(--ui-3); }
+.heat-key { flex: none; width: 12px; height: 12px; border-radius: 2.5px; }
+
+/* ---- 单日下钻（HeatDetailCard:118-190）---- */
+.heat-detail {
+  padding: 12px; border-radius: 12px; background: rgba(0, 0, 0, .3);
+  box-shadow: inset 0 0 0 .5px color-mix(in srgb, var(--claude) 20%, transparent);
+}
+.hd-head { display: flex; align-items: center; gap: 8px; }
+.hd-date { font-size: 13px; font-weight: 700; font-family: var(--mono); color: var(--ui-1); }
+.hd-total { font-size: 15px; font-weight: 700; font-family: var(--num); color: #fff; }
+.hd-close { flex: none; width: 14px; height: 14px; padding: 0; border: 0; background: none; color: var(--ui-3); cursor: pointer; }
+.hd-close svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+/* GridItem(.adaptive(minimum: 105), spacing: 12) + 行距 8 */
+.hd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 8px 12px; }
+.hd-cell { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.hd-name { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 500; color: var(--tint); }
+.hd-name i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tint); }
+.hd-tok { font-size: 11px; font-family: var(--mono); color: var(--ui-3); }
+.hd-cost { font-size: 12px; font-weight: 600; font-family: var(--mono); color: var(--ui-2); }

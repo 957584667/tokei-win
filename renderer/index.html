@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+  <title>Tokei</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="scroll">
+    <!-- 对应 PanelView 的 panelContent：header、页面主体、footer 同在一个
+         spacing 13 / padding 15 的竖排里。与 macOS 的差别是这里的顶部条与 footer 钉住不动，
+         只让中间的页面主体滚动（macOS 是 PV:189 那条整页 ScrollView + showsIndicators:false）。 -->
+    <div class="panel">
+      <header class="topbar">
+        <button type="button" class="brand" id="btn-home" title="主页" aria-label="返回用量页">
+          <!-- 对应 PV:288-295：Image("timer") 16 号粗体 + Theme.brand（claude .8 → claude 横向渐变），
+               节日角标以 topTrailing 对齐并 offset(7,-7)。 -->
+          <span class="mark-wrap">
+            <svg viewBox="0 0 16 16" class="mark" aria-hidden="true">
+              <circle cx="8" cy="9.4" r="5.3" fill="none" stroke="url(#brandGrad)" stroke-width="1.6" stroke-linecap="round"/>
+              <path d="M8 7.2v2.6l1.9 1.1" fill="none" stroke="url(#brandGrad)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M8 4.1V1.9M5.9 1.9h4.2M12.9 4.1l1.2-1.2M3.1 4.1 1.9 2.9" fill="none" stroke="url(#brandGrad)" stroke-width="1.6" stroke-linecap="round"/>
+              <defs><linearGradient id="brandGrad" x1="1.4" y1="0" x2="14.6" y2="0" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#eb8566" stop-opacity=".8"/><stop offset="1" stop-color="#eb8566"/>
+              </linearGradient></defs>
+            </svg>
+            <span class="festive" id="brand-festive" hidden></span>
+          </span>
+          <span class="brand-text">
+            <strong>Tokei</strong>
+            <span class="brand-sub">知度 · AI 用量</span>
+          </span>
+        </button>
+        <span class="filler"></span>
+        <!-- 对应 header 里的 store.lastUpdated：9.5 等宽、三级文字色 -->
+        <span id="last-updated" class="stamp"></span>
+        <button type="button" class="mode-btn" data-mode="projects" title="项目足迹" aria-label="项目足迹">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5.2a1.2 1.2 0 0 1 1.2-1.2h3.3l1.4 1.7h6.9A1.2 1.2 0 0 1 16 6.9v6.3a1.2 1.2 0 0 1-1.2 1.2H3.2A1.2 1.2 0 0 1 2 13.2z"/></svg>
+        </button>
+        <button type="button" class="mode-btn" data-mode="quota" title="额度曲线" aria-label="额度曲线">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.6 2v11.4H14"/><path d="M4.6 10.6l2.8-3.3 2.4 2 3.2-4.5"/></svg>
+        </button>
+        <!-- 对应 PV:347-363 的 chart.bar 钮：位置就在「额度曲线」与「设置」之间 -->
+        <button type="button" class="mode-btn" data-mode="dashboard" title="数据面板" aria-label="数据面板">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.8 4.2h10.4M2.8 8h6.6M2.8 11.8h8.4"/></svg>
+        </button>
+        <button type="button" class="mode-btn" data-mode="settings" title="设置" aria-label="设置">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.3"/><path d="M8 1.7v1.8M8 12.5v1.8M1.7 8h1.8M12.5 8h1.8M3.6 3.6l1.3 1.3M11.1 11.1l1.3 1.3M12.4 3.6l-1.3 1.3M4.9 11.1l-1.3 1.3"/></svg>
+        </button>
+      </header>
+
+      <!-- 滚动区：顶部条与底部 footer 钉在上下两侧，只有页面主体滚动并露出右侧滚动条 -->
+      <div class="view-stack" id="view-stack">
+      <section id="view-usage" class="view is-active">
+        <div id="range-control" class="segmented is-sliding" role="tablist" aria-label="时间区间"></div>
+        <div id="tool-cards" class="card-zone"></div>
+        <p id="idle-tools" class="idle-line" hidden></p>
+      </section>
+
+      <section id="view-quota" class="view">
+        <div id="quota-curve" class="curve"></div>
+      </section>
+
+      <!-- ===== 数据面板：对应 DashboardView（PV:236-237 挂在 panelContent 里，与用量页同一滚动容器）===== -->
+      <section id="view-dashboard" class="view">
+        <div id="dash-body" class="dash"></div>
+      </section>
+
+    <section id="view-projects" class="view">
+      <div class="trail-head">
+        <div class="trail-bar">
+          <svg class="trail-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M10.4 10.4 L14 14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+          </svg>
+          <input id="trail-search" class="trail-search" type="text" placeholder="搜索项目…" aria-label="搜索项目" />
+          <button id="trail-clear" class="trail-clear" hidden aria-label="清空搜索">✕</button>
+        </div>
+        <button id="trail-refresh" class="icon-btn" title="刷新" aria-label="刷新项目">⟳</button>
+      </div>
+      <p id="trail-note" class="hint" hidden></p>
+      <div id="trail-list" class="trail-list"></div>
+      <div id="trail-footer" class="trail-footnote"></div>
+    </section>
+
+    <!-- ===== 设置页：对应 PanelView 的 settingsContent（PV:2665-2691）===== -->
+    <section id="view-settings" class="view">
+      <!-- settingsHeader（PV:3794-3866）：30×30 圆徽 + 标题行 + 副标题，右侧 GitHub 圆钮与 ✕ -->
+      <header class="set-head">
+        <span class="set-badge">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.5"/><path d="M8 1.4v2.2M8 12.4v2.2M1.4 8h2.2M12.4 8h2.2M3.4 3.4l1.5 1.5M11.1 11.1l1.5 1.5M12.6 3.4l-1.5 1.5M4.9 11.1l-1.5 1.5"/></svg>
+        </span>
+        <div class="set-titles">
+          <div class="set-title-line">
+            <span class="set-title">设置</span>
+            <span class="set-build" id="app-version"></span>
+          </div>
+          <span class="set-sub">显示、同步和诊断</span>
+        </div>
+        <span class="filler"></span>
+        <button type="button" class="set-round" id="btn-github" title="GitHub">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.6 9.4a3.1 3.1 0 0 0 4.5 0l1.7-1.8a3.2 3.2 0 0 0-4.5-4.5l-1 1"/><path d="M9.4 6.6a3.1 3.1 0 0 0-4.5 0L3.2 8.4a3.2 3.2 0 0 0 4.5 4.5l1-1"/></svg>
+        </button>
+        <button type="button" class="set-round" id="btn-settings-close" title="关闭设置">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/></svg>
+        </button>
+      </header>
+
+      <!-- 两列各 304.5、列内 11、列间 11（PV:145 的 settingsColumnWidth） -->
+      <div class="set-cols">
+        <div class="set-col">
+          <!-- 显示卡片（PV:2969-3005）：LazyVGrid 两列 spacing 7 的 settingsRow -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.4" y="2.4" width="5" height="5" rx="1.2"/><rect x="8.6" y="2.4" width="5" height="5" rx="1.2"/><rect x="2.4" y="8.6" width="5" height="5" rx="1.2"/><rect x="8.6" y="8.6" width="5" height="5" rx="1.2"/></svg></span>
+              <span class="set-sec-title">显示卡片</span>
+            </div>
+            <div class="set-sec-body"><div class="set-tools" id="tool-toggles"></div></div>
+          </section>
+
+          <!-- Provider 额度（PV:3039+）：密钥只问「存没存」，明文不进渲染进程 -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="8" r="2.6"/><path d="M7.6 8h6M11.6 8v2.4M13.6 8v1.8"/></svg></span>
+              <span class="set-sec-title">Provider 额度</span>
+            </div>
+            <div class="set-sec-body">
+              <p class="set-note">这几项只用于联网查询实时额度，默认全部关闭；密钥用当前 Windows 账户加密后存在 ~/.tokei，不参与同步，留空表示不修改。填好并保存后，下一轮扫描就会带着这份凭据联网取数。</p>
+              <div id="provider-fields"></div>
+              <div class="provider-actions">
+                <button id="btn-provider-save" class="set-act"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M5.3 8.2l1.9 1.9 3.6-4"/></svg><span>保存 Provider 设置</span></button>
+                <span id="provider-result" class="muted"></span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 诊断（PV:3497-3557）：跑一遍采集引擎，报告逐行照 formatDiagnostics（PV:4088-4134）-->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 2.2v2.6a2.4 2.4 0 0 0 4.8 0V2.2"/><path d="M5.8 7.2v2.1a3.1 3.1 0 0 0 6.2 0v-1.1"/><circle cx="12" cy="10.9" r="1.9"/></svg></span>
+              <span class="set-sec-title">诊断</span>
+            </div>
+            <div class="set-sec-body">
+              <div class="diag-bar">
+                <button type="button" class="set-act" id="btn-diag"></button>
+                <span class="diag-spin" id="diag-spin" hidden></span>
+                <span class="filler"></span>
+                <button type="button" class="diag-copy" id="btn-diag-copy" title="复制诊断" hidden>
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.6" y="5.6" width="7" height="7.4" rx="1.4"/><path d="M10.4 3.4H4.2a1.4 1.4 0 0 0-1.4 1.4v6.2"/></svg>
+                </button>
+              </div>
+              <div class="diag-out" id="diag-out" hidden></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="set-col">
+          <!-- 菜单栏（PV:2804-2869）：样式 / 信息 / 额度来源 + 提示语 -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.8" y="3" width="12.4" height="10" rx="2"/><path d="M1.8 6.1h12.4"/></svg></span>
+              <span class="set-sec-title">菜单栏</span>
+            </div>
+            <div class="set-sec-body">
+              <div class="set-stacked"><span class="set-stacked-label">样式</span><div id="style-preview" class="segmented is-mini"></div></div>
+              <div class="set-stacked"><span class="set-stacked-label">信息</span><div id="density-choice" class="segmented is-mini"></div></div>
+              <div class="set-stacked">
+                <span class="set-stacked-label">额度来源</span>
+                <div class="set-tools" id="quota-choice"></div>
+              </div>
+              <p class="set-hint2" id="quota-choice-hint"></p>
+              <p class="set-note">只影响任务栏剩余额度，与「显示卡片」无关。每项都是一个具体窗口：5h 是滚动的 5 小时窗口，周是本周配额。双额度按上面的顺序取前两项，单额度只显示剩得最少的那项。「符号」「圆点」两种样式会用沙漏标 5h、横块标周；其余样式只有数字，鼠标放到任务栏上能看到窗口全名。勾了但本机没有这个窗口、或者读数已过期，任务栏会跳过它。</p>
+            </div>
+          </section>
+
+          <!-- 隐私与额度（PV:3289-3346）：Windows 只有这两项联网开关 -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.9 13.4 4v4.1c0 3-2.3 5.3-5.4 6-3.1-.7-5.4-3-5.4-6V4Z"/></svg></span>
+              <span class="set-sec-title">隐私与额度</span>
+            </div>
+            <div class="set-sec-body" id="privacy-rows"></div>
+          </section>
+
+          <!-- 系统（PV:2940-2966）+ 久坐提醒（PV:3560-3587） -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="6.4" cy="6.4" r="2"/><path d="M6.4 1.8v1.4M6.4 9.6V11M1.8 6.4h1.4M9.6 6.4H11"/><circle cx="11" cy="11" r="2.6"/></svg></span>
+              <span class="set-sec-title">系统</span>
+            </div>
+            <div class="set-sec-body" id="system-rows"></div>
+          </section>
+
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 4.6v3.6l2.2 1.4"/></svg></span>
+              <span class="set-sec-title">久坐提醒</span>
+            </div>
+            <div class="set-sec-body" id="sit-rows"></div>
+          </section>
+
+          <!-- 远程采集（PV:3750-3758）：原版只在没开多设备同步时出现；Windows 还没有同步段，恒显示 -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="4.4" r="1.4"/><path d="M8 5.8v7.6"/><path d="M5.7 6.7a3.3 3.3 0 0 1 0-4.6M10.3 6.7a3.3 3.3 0 0 0 0-4.6"/><path d="M3.8 8.4a6 6 0 0 1 0-8M12.2 8.4a6 6 0 0 0 0-8"/></svg></span>
+              <span class="set-sec-title">远程采集</span>
+            </div>
+            <div class="set-sec-body">
+              <p class="set-note">多台电脑或远程服务器的数据可通过私有 Git 仓库同步，每台设备独立采集、自动加和。</p>
+              <!-- copyBlock（PV:4683-4703）：8 号等宽、四行封顶，右侧一枚无底的复制钮 -->
+              <div class="copy-block">
+                <p class="copy-text" id="remote-setup-cmd">读取 https://raw.githubusercontent.com/cclank/tokei/main/skills/tokei-setup.md 帮我配置 Tokei 多设备同步</p>
+                <span class="filler"></span>
+                <button type="button" class="copy-btn" id="btn-copy-remote" title="复制">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.6" y="5.6" width="7" height="7.4" rx="1.4"/><path d="M10.4 3.4H4.2a1.4 1.4 0 0 0-1.4 1.4v6.2"/></svg>
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+      </div>
+
+      <!-- 对应 PanelView 的 footer：disclaimer + 复制图片 + 刷新 + 退出 -->
+      <footer class="panel-foot">
+        <span id="disclaimer" class="disclaimer">成本按 API 价估算,非订阅实付</span>
+        <span class="filler"></span>
+        <!-- 对应 KA:112-131 的 KeepAwakeMenu：与 IconButton 同尺寸（gap4 / pad 4·9 / 圆角 7 /
+             图标 10 semibold / 文案 11 medium），开启时前景转 Theme.claude、底 fill claude .14。 -->
+        <button type="button" class="foot-btn ka-btn" id="btn-keep-awake" title="左键开关 · 右键配置时长/模式">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path class="cup-body" d="M2.6 5.3h8.2v3.3a4.1 4.1 0 0 1-4.1 4.1 4.1 4.1 0 0 1-4.1-4.1z"/>
+            <path d="M10.8 6.2h1a2 2 0 0 1 0 4h-1.5"/>
+            <path d="M1.7 13.6h11.9"/>
+          </svg>
+          <span id="ka-label">防休眠</span>
+        </button>
+        <button type="button" class="foot-btn" id="btn-copy-image" title="复制用量图">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="4.6" y="1.8" width="9.6" height="8" rx="1.4"/><path d="M11.4 14.2H2.8a1.2 1.2 0 0 1-1.2-1.2V4.6"/></svg>
+          <span>复制</span>
+        </button>
+        <button type="button" class="foot-btn" id="btn-refresh" title="立即刷新 (Ctrl+R)">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.4 6.8A5.6 5.6 0 1 0 13.6 10.4"/><path d="M13.8 2.8v4h-4"/></svg>
+          <span>刷新</span>
+        </button>
+        <button type="button" class="foot-btn" id="btn-quit" title="退出 Tokei">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.2v6"/><path d="M4.6 4.8a5 5 0 1 0 6.8 0"/></svg>
+          <span>退出</span>
+        </button>
+      </footer>
+    </div>
+  </main>
+
+  <div id="trail-menu" class="trail-menu" hidden role="menu" aria-label="项目操作">
+    <button data-act="terminal" role="menuitem">在终端打开</button>
+    <button data-act="explorer" role="menuitem">在文件管理器中显示</button>
+    <button data-act="code" role="menuitem">用 VS Code 打开</button>
+    <button data-act="copy" role="menuitem">复制路径</button>
+  </div>
+
+  <!-- 防休眠右键菜单：对应 KA:132-153 的 .contextMenu（五个时长 + 模式 + 低电量保护 + 关闭） -->
+  <div id="keep-awake-menu" class="trail-menu ka-menu" hidden role="menu" aria-label="防休眠">
+    <button type="button" role="menuitem" data-min=""><svg viewBox="0 0 16 16" class="ka-ico" aria-hidden="true"><path d="M4.6 5.6C3 5.6 2.2 6.9 2.2 8s.8 2.4 2.4 2.4c2.4 0 3-4.8 5.4-4.8 1.6 0 2.4 1.3 2.4 2.4s-.8 2.4-2.4 2.4c-2.4 0-3-4.8-5.4-4.8Z"/></svg><span>无限期</span></button>
+    <button type="button" role="menuitem" data-min="15"><svg viewBox="0 0 16 16" class="ka-ico" aria-hidden="true"></svg><span>15 分钟</span></button>
+    <button type="button" role="menuitem" data-min="30"><svg viewBox="0 0 16 16" class="ka-ico" aria-hidden="true"></svg><span>30 分钟</span></button>
+    <button type="button" role="menuitem" data-min="60"><svg viewBox="0 0 16 16" class="ka-ico" aria-hidden="true"></svg><span>1 小时</span></button>
+    <button type="button" role="menuitem" data-min="120"><svg viewBox="0 0 16 16" class="ka-ico" aria-hidden="true"></svg><span>2 小时</span></button>
+    <div class="ka-sep"></div>
+    <button type="button" role="menuitem" data-mode="false"><span class="ka-check" aria-hidden="true"></span><span>保持亮屏</span></button>
+    <button type="button" role="menuitem" data-mode="true"><span class="ka-check" aria-hidden="true"></span><span>允许关屏</span></button>
+    <button type="button" role="menuitem" data-lowbattery><span class="ka-check" aria-hidden="true"></span><span>低电量保护</span></button>
+    <div class="ka-sep" id="ka-sep-stop" hidden></div>
+    <button type="button" role="menuitem" class="ka-stop" id="ka-stop" hidden><svg viewBox="0 0 16 16" class="ka-ico" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="m6 6 4 4M10 6l-4 4"/></svg><span>关闭防休眠</span></button>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
