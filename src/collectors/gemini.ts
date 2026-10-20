@@ -439,7 +439,8 @@ function loadGeminiJsonFile(file: string): Omit<ParsedFile, "sig" | "mtime"> | n
   };
 }
 
-function loadGeminiUsageFile(file: string): Omit<ParsedFile, "sig" | "mtime"> | null {
+/** 导出来给「查漏补缺」扫模型名用：它只要 events[].model，不要区间。 */
+export function loadGeminiUsageFile(file: string): Omit<ParsedFile, "sig" | "mtime"> | null {
   return file.endsWith(".db") ? loadAntigravityDb(file) : loadGeminiJsonFile(file);
 }
 

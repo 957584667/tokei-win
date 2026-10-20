@@ -9,12 +9,14 @@
  */
 import { shell } from "electron";
 import { spawn } from "child_process";
-import { TrailProject, projectTrail } from "../core/trail";
+import { attachPorts, TrailProject, projectTrail } from "../core/trail";
+import { detectLocalServers } from "./localPorts";
 
 export type TrailTarget = "explorer" | "terminal" | "code";
 
 export interface TrailOps {
-  list(cache: Record<string, any>): TrailProject[];
+  /** 端口探测是异步的（spawn netstat + PowerShell），调用方 await 即可 */
+  list(cache: Record<string, any>): Promise<TrailProject[]>;
   /** 复制路径也走同一道白名单：面板只有拿到清单里的路径才该被写进剪贴板 */
   has(rawPath: unknown): boolean;
   run(rawPath: unknown, target: unknown): Promise<{ ok: boolean; message?: string }>;
@@ -42,11 +44,12 @@ export function makeTrailOps(): TrailOps {
   }
 
   return {
-    list(cache) {
+    async list(cache) {
       const list = projectTrail(cache);
       allowed.clear();
       for (const item of list) allowed.add(item.path);
-      return list;
+      // 端口探测要起两个子进程：只在打开这一页时跑一次，异步等它，别卡住主进程的托盘
+      return attachPorts(list, await detectLocalServers(list.map((item) => item.path)));
     },
 
     has(rawPath) {

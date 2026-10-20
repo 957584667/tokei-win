@@ -10,7 +10,10 @@ import * as fs from "fs";
 import * as path from "path";
 import { HOME, existingDirs, isDirectory, isFile, pathCandidates } from "../core/paths";
 import { Bounds, RangeKey, RANGE_KEYS, classifyDay, parseTs } from "../core/ranges";
-import { hasKnownPrice, modelIdentityId, rawPrice } from "../core/price";
+import {
+  cachedEntryHasPricingChange, hasKnownPrice, modelHasPricingChange, modelIdentityId,
+  pricingChangeMultiplier, rawPrice,
+} from "../core/price";
 import { CodexRangeOut, ModelUsage, addModelUsage, codexRange } from "../core/model";
 import {
   DayRecord, codexLegacyDay, ledgerMemo, ledgerReconcile, ledgerSameValue,
@@ -799,6 +802,79 @@ export function codexDaysFromCachedEvents(
   return days;
 }
 
+/**
+ * 对应 _scale_codex_cached_days：拿不到某个变更模型的倍率就没法缩放（返回 false），
+ * 由调用方退回「按事件重算」。days 与 deduped_days 常指向同一批日账对象，所以按引用去重，
+ * 否则同一个模型的 cost 会被乘两遍。
+ */
+function scaleCodexCachedDays(
+  entry: CodexFileEntry, changedModels: Array<string | null>, multipliers: Record<string, number>,
+): boolean {
+  const days: CodexDay[] = [];
+  const seen = new Set<CodexDay>();
+  for (const field of ["days", "deduped_days"] as const) {
+    const values = entry[field];
+    if (!isObj(values)) continue;
+    for (const day of Object.values(values)) {
+      if (isObj(day) && !seen.has(day as CodexDay)) {
+        seen.add(day as CodexDay);
+        days.push(day as CodexDay);
+      }
+    }
+  }
+  const targets: Array<[ModelUsage, number]> = [];
+  for (const day of days) {
+    if (!isObj(day.models)) continue;
+    for (const [model, usage] of Object.entries(day.models)) {
+      if (!modelHasPricingChange(model, changedModels)) continue;
+      const multiplier = pricingChangeMultiplier(model, multipliers);
+      if (multiplier === null) return false;
+      targets.push([usage, multiplier]);
+    }
+  }
+  if (!targets.length) return false;
+  const updated = new Set<ModelUsage>();
+  for (const [usage, multiplier] of targets) {
+    if (updated.has(usage)) continue;
+    usage.cost = flt(usage.cost) * multiplier;
+    updated.add(usage);
+  }
+  for (const day of days) {
+    const models = isObj(day.models) ? day.models : {};
+    day.cost = Object.values(models).reduce((sum, value) => sum + flt((value as ModelUsage)?.cost), 0);
+  }
+  return true;
+}
+
+/**
+ * 对应 _reprice_codex_event_caches：价目表变过，先把能缩放的日账按倍率乘过去，
+ * 乘不动的就用手上的事件明细重算整份日账。
+ * Python 那份「事件缓存读坏了就删盘重建」在这里没有对应物——我们的事件本来就在内存里，
+ * 读它不会失败；缺明细（Array.isArray 不成立）等于 _codex_event_cache_ready 为假，
+ * 跳过即可，紧接着的扫描循环会因为 sig/版本判定把这份条目重新解析一遍。
+ */
+function repriceCodexEventCaches(
+  fileCache: Record<string, CodexFileEntry>, changedModels: Array<string | null>, multipliers: Record<string, number>,
+): boolean {
+  let changed = false;
+  for (const entry of Object.values(fileCache)) {
+    if (!entry || !cachedEntryHasPricingChange(entry, changedModels)) continue;
+    if (scaleCodexCachedDays(entry, changedModels, multipliers)) {
+      changed = true;
+      continue;
+    }
+    const events = entry.events;
+    if (!Array.isArray(events)) continue;
+    const dropCount = Math.min(Math.max(num(entry.drop_count), 0), events.length);
+    const days = codexDaysFromCachedEvents(entry, dropCount, entry.event_count);
+    if (!sameDays(entry.deduped_days, days)) entry.deduped_days = days;
+    const expectedDays = entry.canonical ? days : {};
+    if (!sameDays(entry.days, expectedDays)) entry.days = expectedDays;
+    changed = true;
+  }
+  return changed;
+}
+
 /** 对应 _codex_link_segment_mirrors：同一 thread 的多段之间把 response_id 传染给旧式镜像事件 */
 export function codexLinkSegmentMirrors(fileCache: Record<string, CodexFileEntry>): Set<string> {
   const groups = new Map<string, string[]>();
@@ -1423,6 +1499,12 @@ export function scanCodex(
 ): CodexScanResult {
   ledgerTouch("codex");
   const fc: Record<string, CodexFileEntry> = (cache.codex ??= {});
+  // 对应 4420-4424：这一轮价目表变过，未重新解析的文件条目先按新价重算缓存日账
+  if (cache._pricing_changed && repriceCodexEventCaches(
+    fc,
+    Array.isArray(cache._pricing_changed_models) ? cache._pricing_changed_models : [],
+    isObj(cache._pricing_cost_multipliers) ? cache._pricing_cost_multipliers : {},
+  )) cache._dirty = true;
   const rolloutFiles = codexRolloutFiles();
   const activeSessionsDir = codexSessionsDir();
   const activeRoot = isDirectory(activeSessionsDir) ? safeRealpath(activeSessionsDir) : null;

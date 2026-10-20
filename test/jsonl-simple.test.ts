@@ -307,12 +307,12 @@ describe("workbuddy collectors", () => {
 });
 
 describe("codebuddy collector", () => {
-  it("input = prompt 总量 - cache_read - prompt_cache_write；sessionId+messageId 去重而非 requestId；Credit 不折美元", () => {
+  it("input = prompt 总量 - cache_read - prompt_cache_write；messageId 全局去重（跨会话也只算一次）；Credit 不折美元", () => {
     const dir = mkTmp();
     process.env.TOKEI_CODEBUDDY_DIR = dir;
-    const call = (messageId: string | null, entryId: string, requestId: string, tokens: Record<string, number>, credit: number) => ({
+    const call = (messageId: string | null, entryId: string, requestId: string, tokens: Record<string, number>, credit: number, session = "cb-1") => ({
       id: entryId,
-      sessionId: "cb-1",
+      sessionId: session,
       cwd: "C:/work/cb",
       timestamp: "2026-09-15T08:00:00Z",
       message: { role: "assistant" },
@@ -330,11 +330,15 @@ describe("codebuddy collector", () => {
     const main = call("m-1", "e-1", "req-A", { in: 1000, out: 50, cr: 600, cw: 100 }, 2.5);
     const second = call("m-2", "e-2", "req-A", { in: 400, out: 20, cr: 100, cw: 0 }, 1.5); // 同 requestId 不同 messageId → 都算
     writeJsonl(path.join(dir, "cb-1.jsonl"), [main, second]);
-    // subagents 副本：同 sessionId+messageId → 只计一次；无 messageId 回退 entry id
+    // subagents 副本：同 messageId → 只计一次；无 messageId 回退 sessionId+entry id
     writeJsonl(path.join(dir, "subagents", "cb-1-sub.jsonl"), [
       main,
       call(null, "e-3", "req-B", { in: 200, out: 10, cr: 0, cw: 0 }, 1),
       call(null, "e-3", "req-C", { in: 200, out: 10, cr: 0, cw: 0 }, 1), // 同 entry id → 去重
+    ]);
+    // 另一个会话里转发同一条 messageId：去重键不含 session，仍只计一次、也不重复计会话
+    writeJsonl(path.join(dir, "cb-2.jsonl"), [
+      call("m-1", "e-4", "req-E", { in: 100, out: 5, cr: 0, cw: 0 }, 0.5, "cb-2"),
     ]);
     // traces/logs 目录不是数据源
     writeJsonl(path.join(dir, "traces", "t.jsonl"), [call("m-9", "e-9", "req-D", { in: 5555, out: 5555, cr: 0, cw: 0 }, 9)]);

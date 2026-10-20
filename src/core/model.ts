@@ -422,6 +422,9 @@ export function recalcCosts(result: Record<string, any>): void {
         const modelId = typeof m.model_id === "string" ? m.model_id : null;
         let priceId = modelId ? exactPricingId(modelId) : null;
         if (!priceId) priceId = pricingId(name);
+        // 单价借自别的模型（沿用上一个版本 / 家族代表）时注明参照，界面要标出来
+        const identity = typeof m.model_id === "string" ? m.model_id : modelIdentityId(name);
+        m.pref = priceId && modelIdentityId(priceId) !== identity ? niceModel(priceId) : null;
         const authoritative = float(m.cost);
         if (toolKey === "deepseek_harness") {
           totalCost += authoritative;

@@ -26,17 +26,21 @@ Antigravity、Cursor、Zed、Sub2API、z.ai / GLM
 
 **托盘图标**：7 种样式（经典白 / 彩色 / 刻度 / 圆点 / 数字 / 星轨 / 椰影）× 3 档信息量（双额度 / 单额度 / 仅图标）。墨色自动跟随任务栏深浅 —— 读 `HKCU\...\Themes\Personalize`，Win11 看 `AppsUseLightTheme`、Win10 看 `SystemUsesLightTheme`，60 秒轮询跟上；出图失败退回 `resources/` 里预制的兜底 PNG，绝不出现空白图标。
 
-**面板**（420×640 无边框窗）：Win11 22H2 起（build ≥ 22621）走亚克力透明底并跟随任务栏深浅色，更旧的 Windows 退回实色底。
+**面板**（无边框窗，宽度按页在 322 / 420 / 640 三档间切换）：Win11 22H2 起（build ≥ 22621）走亚克力透明底并跟随任务栏深浅色，更旧的 Windows 退回实色底。高度按内容自然高度给，夹在工作区高度的 88% 以内（下限 320）、贴托盘所在屏的右上角；换页后按新宽度重排、重新量高并重新贴边。
 
 | 页 | 内容 |
 |---|---|
 | 用量 | 按工具卡片 + 闲置工具折叠，区间 7 档：今日 / 昨日 / 本周 / 上周 / 本月 / 今年 / 全部 |
 | 额度 | 实时额度卡、168 小时额度曲线、1 月 / 1 年明细与周额度周期卡 |
 | Dashboard | 全年热力图、模型 / 项目排行、单日下钻、Wrapped 年报 |
-| 项目轨迹 | 按项目聚合的历史用量与检索 |
-| 设置 | 工具显隐卡片、菜单栏（样式 / 信息量 / 额度来源）、Provider 凭据与额度、远程采集、隐私与额度、久坐提醒、系统、运行诊断 |
+| 项目轨迹 | 按项目聚合的历史用量与检索；项目行下挂本机监听端口的胶囊（`netstat -ano` + PowerShell 查进程路径/命令行，按最长项目路径归属，点开 `http://localhost:PORT`） |
+| 设置 | 工具显隐卡片、菜单栏（样式 / 信息量 / 额度来源）、Provider 凭据与额度、远程采集、隐私与额度、版本与更新、久坐提醒、系统、运行诊断 |
 
 **刷新节奏**：面板可见 10 秒、后台 30 秒，并按上一轮耗时 ×2 退避防止扫描堆积；2 秒 tick 对齐原版 `main.swift`。
+
+**分享出图**：页脚「复制图片」与工具卡头的复制钮把当前区间画成 2 倍分辨率的分享卡写进剪贴板（对应 `UsageShareImage.swift` / `copyUsageImage` / `copySingleToolImage`）：多工具宽 380、单工具宽 340，深色圆角卡 + 逐工具明细 + 合计明细 + 「更新于 …」，字号跟随面板字号设置。出图在一个隐藏窗口里按静态页渲染后截取，不截屏幕、不依赖面板当前滚动位置。
+
+**自动更新**：启动查一次，之后每 6 小时一次（对应 `Updater.swift`）。元数据双源：`https://dl.lanshuagent.com/tokei/latest.json` 与 GitHub 的 `cclank/tokei` 最新 release；标签按数字段比较，下载地址只认 HTTPS + `dl.lanshuagent.com` / `github.com`，跳转只放行 `release-assets.githubusercontent.com`，安装包必须带 sha256。Windows 只认 `.exe` / `.msi`（GitHub assets，或 `latest.json` 里用 `windows_download_url` + `windows_sha256` 单独挂一份）；只有 DMG 的新版会被当作 macOS 发布静默跳过。下载到临时目录、校验通过后交给系统安装器再退出。面板头部的圆环按「可升级 / 下载中 / 安装中 / 失败」四态出现，设置页「版本与更新」段六态都有落点；`TOKEI_LOCAL_BUILD=1` 的本地验证版只允许手动检查。版本比较的本地值是 `package.json` 里的版本号，发布 Windows 资产时标签要和它一致（别沿用 macOS 的 `v1.0.46`，否则装完还会被当成旧版一直提示）。
 
 ## 系统能力（Windows 化实现）
 
@@ -46,6 +50,8 @@ Antigravity、Cursor、Zed、Sub2API、z.ai / GLM
 | 防休眠 | `powerSaveBlocker`：保持亮屏 = 防关屏 + 防系统睡眠；允许关屏 = 仅防空闲睡眠；带低电量保护 |
 | 久坐提醒 | `powerMonitor.getSystemIdleTime` 作 macOS `IOHIDSystem` 的等价物，30 秒 tick，空闲满 5 分钟视为离开并清零 |
 | 单实例 | `requestSingleInstanceLock`，二次启动直接把面板叫出来 |
+| 自动更新 | 双源元数据 + 标签比较 + sha256 校验 + 域名/跳转白名单；下载校验通过后起系统安装器并退出（详见「自动更新」段） |
+| 开机首刷 | 起进程先把上一轮落盘的 `last_usage.json` 垫进托盘，表头写「缓存数据 · 后台更新中」，第一趟扫描在后台跑（对应 `primeCachedUsage`）；垫之前剥掉 `_` 开头的内部键，并按「现在」重算 Claude 那三路额度的过期标记 |
 | 托盘交互 | 左键 / 双击开面板；右键菜单：打开面板、立即刷新、菜单栏样式、菜单栏信息量、状态栏额度（三项均为子菜单）、开机自启、防休眠、退出 |
 
 ## 凭据与隐私
@@ -53,6 +59,7 @@ Antigravity、Cursor、Zed、Sub2API、z.ai / GLM
 - 密钥用 Electron `safeStorage`（Windows **DPAPI**，绑定当前 Windows 账户）加密后存 `~/.tokei`，等价 macOS 的 Keychain；换账户解不开会明确报原因而不是静默失败。
 - **渲染进程只能问「存没存」，拿不到明文**：面板用 `innerHTML` 铺数据，把密钥交给渲染进程等于给一次注入就等于泄露。
 - 联网取额度**默认全关**，必须在设置页隐私段明确勾选；凭据缺失时直接返回空结果，绝不发请求。HTTP 层**不跟随重定向**，防止凭据被送到另一个域。同一凭据 5 分钟内的读数复用缓存，请求失败退回 1 小时内的旧读数并标记陈旧。
+- **应用活跃统计默认开启**（照原版），设置页隐私段第一行可随时关闭。每次启动只尝试一次，只发随机安装 ID、去掉 `v` 的版本号、系统名与版本四个字段到 `https://tokei-ops.lanshuagent.com/v1/heartbeat`，不带账号、项目、对话、Token、费用或额度，也不带任何凭据；状态文件在 `%APPDATA%\Tokei\Telemetry\state.json`（只含安装 ID 与两个时间戳）。**从不跟随重定向**，安装 ID 不会被送到别的域；文件坏了宁可这一次不上报，也不会另生成一个安装 ID。
 - Token 统计只读本地文件；`CodeBuddy` 一类明确不读账户余额。
 
 ## 数据持久化
@@ -64,6 +71,12 @@ Antigravity、Cursor、Zed、Sub2API、z.ai / GLM
 - `ledger.json` — 持久账本：CLI（如 Claude Code 默认 30 天清理）删掉旧日志后，历史用量不再缩水
 - `quota_history.json`、`quota_detail.json`、`quota_cycles.json` — 额度曲线与明细
 - `*_quota_cache.json`、`*_scan_cache.json` — 各来源缓存（含凭据指纹 marker，换账号即失效）
+
+价目表（`resources/pricing.json` 是 OpenRouter 基准价，`resources/pricing_overrides.json` 是本地覆盖，`~/.tokei/` 下的同名副本优先）改完不用重启：每轮刷新先按文件的修改时间与大小重读，再比对价目表指纹，命中变更的模型会重算扫描缓存里预存的成本——Claude 逐事件重计价，Codex 能按倍率缩放就缩放、否则用手上的事件明细重建日账。
+
+抓价照原版有两趟：启动时若 `~/.tokei/pricing.json` 的修改时间距今超过 24 小时，自动从 OpenRouter 拉一次全量价目表；设置页「价格表」段的那个「全量更新」按钮走同一条链路。下架的模型不删条目，标 `retired` 后价格维持最后一版；`_meta` 里记 `count / active_count / retained_count`。第一次读价目表时会把安装目录里那份复制到 `~/.tokei` 并**带上源的修改时间**——安装目录多半不可写，而 24 小时水位读的正是这个时间，副本要是按「复制的那一刻」算，新装完得白等一天才跑第一趟自动抓价。抓价失败只在日志里响，面板不弹错误（原版只读 stdout，行为照搬）。
+
+「价格表」段旁边还有第二个按钮「查漏补缺」，对应原版的 `update_unknown()`：它一次网络请求都不发，只扫本机日志里出现过的模型名，价目表和覆盖表都不认的那些——先在表里找同档位同家族的近亲（`max`/`plus`/`flash`/`lite`/`turbo`/`pro`/`mini` 里第一个命中的档位，再要求家族关键词同时出现在两边），借它的四个价写进 `~/.tokei/pricing_overrides.json` 的 `models` 并留一条 `aliases`；找不到近亲的只写 `aliases`，让这个名字至少能被解析。补完清掉扫描缓存并立刻重算，成本按新价目表刷新。跑第二趟必然报「所有模型价格已匹配」，覆盖表一个字都不会再动。
 
 坏文件不崩应用：所有读取走统一的容错加载，脏值回落到默认设置。
 
@@ -79,7 +92,7 @@ npm run cli -- --json      # 无 UI 跑一遍采集引擎
 npm test           # 构建 + vitest
 ```
 
-CLI 其他出口：`--projects`（按项目足迹，紧凑 JSON）、`--errors`（把各采集器的错误打到 stderr）、`--compact`（输出压成单行）。默认输出与原版 `main_json()` 同形，并额外挂一份 `_pricing` 价表水位，设置页的诊断段就报这一行。
+CLI 其他出口：`--projects`（按项目足迹，紧凑 JSON）、`--errors`（把各采集器的错误打到 stderr）、`--compact`（输出压成单行）、`--update-prices`（抓一次 OpenRouter 价目表并落盘，成功打一行摘要、失败退出码 1）、`--update-unknown`（查漏补缺，成功打一行 `{"status":"ok","count":N,"added":[...]}`、失败退出码 1）。设置页那两个按钮都不在 Electron 进程里跑：主进程用 `ELECTRON_RUN_AS_NODE` 起一个子进程执行 `dist/cli.js`，只读它的 stdout——和原版 Swift 起 `python3` 是同一条路子，所以缺漏那一趟不设超时，原版 `waitUntilExit()` 也是一直等。默认输出与原版 `main_json()` 同形，并额外挂一份 `_pricing` 价表水位，设置页的诊断段就报这一行。
 
 ## 目录结构
 
@@ -88,7 +101,7 @@ src/core/        采集与计算引擎：路径发现、定价、区间、账本
 src/collectors/  本地日志 / SQLite 扫描器（覆盖 27 个工具键）+ Claude 套餐缓存扫描
 src/main/        Electron 主进程：托盘出图、面板、设置、DPAPI、13 路联网额度、诊断、防休眠
 src/cli.ts       无 UI 出口，与 --json 同形
-renderer/        面板：index.html + app.js + styles.css
+renderer/        面板：index.html + app.js + styles.css；分享卡：share.html + share.css + share.js
 resources/       定价表 507 条、价格覆盖、托盘兜底 PNG
 test/            vitest 用例
 scratch/         验证夹具与无头渲染度量脚本
@@ -96,17 +109,17 @@ scratch/         验证夹具与无头渲染度量脚本
 
 ## 怎么验证的
 
-- `npm test`：37 个文件 / 587 个用例，覆盖定价、去重、区间切分、账本合并、每个额度 fetcher 的信封拆解与降级路径。fetcher 单测一律用临时目录夹具（`node:sqlite` + `TOKEI_*` 环境变量注入），**不碰真实 `~/.tokei`**。
-- 界面几何不靠肉眼：`scratch/panel-harness.cjs` 生成真实样式的静态页，`scratch/edge-one.sh` 用 headless Edge 多档视口量盒子相交与文字溢出，逐元素核对与 Swift 源一致的间距、截断、换行。
+- `npm test`：49 个文件 / 725 个用例，覆盖定价、去重、区间切分、账本合并、每个额度 fetcher 的信封拆解与降级路径，设置项合并（脏值回默认、卡片显隐镜像的键名），价目表变更后的缓存重算（指纹名单、Claude 事件重计价、Codex 日账的缩放与重建两条路），抓价（`mtok` 换算、`_meta` 与 retired 保留、变更名单、24 小时水位、失败不动文件），查漏补缺（精确匹配判定、近亲借价的选择规则、有价/无价两条写表分支、覆盖表的落盘格式与写失败、第二趟收敛、六路本机日志扫名），开机垫的那份快照（内部键剥离、缺文件与坏 JSON、过期标记按现在重算），活跃统计（默认开/可关、只试一次、状态文件坏掉不换安装 ID、非 204 与改跳的域都不记成功日、关闭时掐断在跑的那一发），面板尺寸夹取（88% 屏高、320 下限、宽度不足 322 时夹回），本机端口归属（netstat 解析、进程命令行边界匹配、最长项目优先、家目录排除），分享卡的数据层（各工具行的指标口径与排序、合计、更新于行、多/单工具宽度与标题），以及更新器（版本比较、域名/后缀/摘要白名单、只有 DMG 的新版静默跳过、双源回退、本地验证版只在手动检查后安装、下载校验失败不启动安装器）。fetcher 单测一律用临时目录夹具（`node:sqlite` + `TOKEI_*` 环境变量注入），抓价用例把那个模型列表接口换成注入的假 transport，查漏补缺用例再断言这条链路连假 transport 都不碰，**一次真实第三方请求都没发过**；`test/pin-home.ts` 作为 setup 文件把 `HOME`/`USERPROFILE` 钉到临时目录，用例读不到本机 `~/.tokei` 里那份真实价目表。
+- 界面几何不靠肉眼：`scratch/panel-harness.cjs` 生成真实样式的静态页，`scratch/edge-one.sh` 用 headless Edge 多档视口量盒子相交与文字溢出，逐元素核对与 Swift 源一致的间距、截断、换行。「大」字号那一档（`--ui-scale: 1.12`）在 640/420/322 三档视口各量一遍。分享卡另用 `scratch/share-check.cjs`：拿生产 `share.js` / `share.css` 和真实 `buildShareSpec` 输出渲染，量整卡尺寸、列宽与溢出，确认 2 倍出图不被裁切。
 
 ## 已知未完成
 
 - Git 多设备同步与设备范围切换（`sync_dir` / `device_id` 键已就位，链路未接）
-- 自动更新器、自动抓价、应用活跃统计
+- Windows 安装包发布链路：仓库里还没有 electron-builder 配置，线上也还没有 `.exe` / `.msi` 资产；更新器本身已就位，发布时把安装包和 sha256 挂进上面说的元数据即可
 - 用量页的额度型紧凑卡（Cursor / Zed / Sub2API / z.ai / Antigravity）
 - CLI 的 `--quota-detail` 出口尚未接上（额度明细只在面板里出）
 - CLI 出口暂不带实时额度（DPAPI 凭据只能在有桌面会话的进程里解）
-- 暂无英文界面表
+- 暂无英文界面表（原版 `L10n.languageDidChange` 的换语言即时重刷也悬在这张表上，目前界面只有中文）
 
 ## 许可
 

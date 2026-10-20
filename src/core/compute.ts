@@ -34,6 +34,7 @@ import { scanMinimax } from "../collectors/minimax";
 import { scanKimiCode } from "../collectors/kimicode";
 import { emptyQwenworkPayload, QwenworkQuotaPayload, scanQwenwork } from "../collectors/qwenwork";
 import { scanDeepSeekHarness } from "../collectors/deepseek_harness";
+import { finishPricingPass, markPricingChanges, reloadPricingIfChanged } from "./price";
 import { ledgerFlush } from "./ledger";
 import { providerUsageFromDays } from "./providerQuota";
 import {
@@ -167,6 +168,13 @@ export interface LiveQuotas {
 
 export function compute(cache: Record<string, any> = {}, now = new Date(), live: LiveQuotas = {}):
   { payload: Record<string, any>; bounds: Bounds; errors: Record<string, string> } {
+  // 对应 _load_scan_cache() 的指纹比对那一档：先重读两份价目文件，和缓存里盖过的指纹不一样
+  // 就把变更模型标进缓存，让 claude/codex 采集器重算已缓存的成本。
+  // macOS 每轮刷新都新起一个 python3 进程跑脚本（DataLoader.swift:675），价目文件天然每轮重读；
+  // 我们是个长跑进程、价目只在启动时读一次，所以这里补上热重载这一步，
+  // 否则改了 pricing.json 要等重启才生效，指纹这条路也永远走不到。
+  reloadPricingIfChanged();
+  markPricingChanges(cache);
   const bounds = rangeBounds(now);
   const errors: Record<string, string> = {};
   const ctx: ScanContext = { bounds, cache, errors };
@@ -251,6 +259,10 @@ export function compute(cache: Record<string, any> = {}, now = new Date(), live:
     grokBotQuota.usage = providerUsageFromDays(grokBotDays);
     providerQuotas.grok_bot = grokBotQuota;
   }
+
+  // 对应扫描收尾的 14746-14752：本轮按新价重算过，就把这一版的价目表快照盖回缓存，
+  // 变更标记清掉——下一轮指纹一致，不会再重复重算。
+  finishPricingPass(cache);
 
   // 所有扫描器都跑完后统一落盘账本（对应 scan_* 之后的 ledger_flush()）：
   // 落盘前会在锁内重读磁盘再合并，多个进程并发也不会互相盖掉高水位

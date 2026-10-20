@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+  <title>Tokei 分享卡</title>
+  <link rel="stylesheet" href="share.css" />
+</head>
+<body>
+  <!-- 隐藏窗口专用：主进程注入 spec → __renderShare() 画卡并回报尺寸 → capturePage 取图 -->
+  <div id="root"></div>
+  <script src="share.js"></script>
+</body>
+</html>

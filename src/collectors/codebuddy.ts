@@ -8,12 +8,13 @@
  *   output = output_tokens/completion_tokens（thinking 已含在输出内，reason 恒 0）。
  * - Credit = providerData.rawUsage.credit 逐次模型调用累计；Credit 绝不换算成美元。
  * - 只有模型命中精确目录价才估美元；codebuddy 在 _recalc_costs 名单，最终由 recalc 重算。
- * - 去重键 sessionId + providerData.messageId，回退 entry id；
+ * - 去重键 providerData.messageId 的 sha256（全局，不含会话），回退 sessionId + entry id；
  *   conversationRequestId 只关联轮次，绝不作为去重键。
  * 历史账本已接 ledger_reconcile：JSONL 被清后用 ~/.tokei/ledger.json 的逐会话快照回补；
  * codebuddy 不在 _UNPRICED_COST_TOOLS 名单，无需 _prepare_unpriced_cost_ledger 清历史美元。
  */
 import * as fs from "fs";
+import * as crypto from "crypto";
 import * as path from "path";
 import { HOME, existingDirs, pathCandidates } from "../core/paths";
 import { Bounds, RangeKey, RANGE_KEYS, classifyDay, dayKey, parseTs } from "../core/ranges";
@@ -32,8 +33,8 @@ export interface CodeBuddyScanResult {
   projects: Record<string, Record<string, DayStat>>;
 }
 
-/** 解析口径版本：改解析规则时 +1 使旧缓存失效 */
-const CODEBUDDY_PARSER_VERSION = 1;
+/** 解析口径版本：改解析规则时 +1 使旧缓存失效（v2：去重键改为 messageId 的 sha256） */
+const CODEBUDDY_PARSER_VERSION = 2;
 
 interface CodeBuddyRecord {
   date: string;
@@ -209,6 +210,10 @@ function isDataSource(file: string): boolean {
   return !/(^|\/)(traces|logs)(\/|$)/i.test(norm);
 }
 
+function sha256(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
 function parseCodeBuddyFile(file: string): { records: CodeBuddyRecord[]; proj: string | null; sid: string } {
   const records: CodeBuddyRecord[] = [];
   let project: string | null = null;
@@ -229,15 +234,16 @@ function parseCodeBuddyFile(file: string): { records: CodeBuddyRecord[]; proj: s
     const provider = isObject(item.providerData) ? item.providerData : {};
     const session = String(item.sessionId || sessionId);
     const messageId = String(provider.messageId || "");
-    // 去重键 sessionId+messageId，回退 entry id；conversationRequestId 只作轮次关联
+    const tsKey = String(item.timestamp ?? messageOf(item)?.timestamp ?? "");
+    // codebuddy 按 messageId 的 sha256 全局去重（同一消息在多个文件里重复出现），
+    // 没有 messageId 才退回 sessionId+entry id；conversationRequestId 只作轮次关联
     const dedupId = messageId || String(item.id || "");
-    const dedup = dedupId
-      ? `codebuddy:${session}\0${dedupId}`
-      : `${file}:${lineNo}:${String(item.timestamp ?? "")}`;
-    records.push({
-      ...base, session, dedup, line: lineNo,
-      ts_key: String(item.timestamp ?? messageOf(item)?.timestamp ?? ""),
-    });
+    const dedup = messageId
+      ? `codebuddy:${sha256(messageId)}`
+      : dedupId
+        ? JSON.stringify([session, dedupId, tsKey])
+        : `${file}:${lineNo}:${tsKey}`;
+    records.push({ ...base, session, dedup, line: lineNo, ts_key: tsKey });
   });
   return { records, proj: project, sid: String(sessionId) };
 }

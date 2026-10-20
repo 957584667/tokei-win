@@ -15,7 +15,7 @@ import * as crypto from "crypto";
 import * as path from "path";
 import { TOKEI_DIR, loadJson, saveJson } from "./paths";
 import { dayKey } from "./ranges";
-import { pricingId } from "./price";
+import { pricingId, rawPrice } from "./price";
 import { REASON_INSIDE_OUTPUT } from "./model";
 
 /** 对应 _LEDGER_FILE。注意这里不走 _writable_path：账本永远在 ~/.tokei 下 */
@@ -27,9 +27,13 @@ const LEDGER_VERSION = 1;
 const LEDGER_SOURCES_RETAIN_DAYS = 45;
 /** 对应 _LEDGER_TOKEN_FIELDS：cached 不在其中，它永远是 in 的子集 */
 const LEDGER_TOKEN_FIELDS = ["in", "out", "cr", "cw", "reason", "thoughts"] as const;
-/** 对应 _UNPRICED_COST_TOOLS / _UNPRICED_COST_SCHEMA */
+/**
+ * 对应 _UNPRICED_COST_TOOLS / _UNPRICED_COST_SCHEMA。
+ * v1：去掉旧版按 Opus 兜底猜出来的美元；v2：裸模型名按名字到价目表查价，清零的行有了价就补回；
+ * v3：价目表里没有的沿用同一版本线上一个版本的价。
+ */
 const UNPRICED_COST_TOOLS = ["workbuddy", "workbuddy_ai", "pi", "qwencode"];
-const UNPRICED_COST_SCHEMA = 1;
+const UNPRICED_COST_SCHEMA = 3;
 /** 对应 _QODERCLI_DIRS 的键：这两个工具的账本做过整体迁移 */
 const QODERCLI_TOOLS = ["qodercli", "qodercli_cn"];
 /**
@@ -416,19 +420,37 @@ export function ledgerFlush(): void {
   memo.dirty = false;
 }
 
-/** 对应 _drop_unpriced_costs：清掉没有公开价模型被按 Opus 兜底猜出来的成本 */
-export function dropUnpricedCosts(day: DayRecord): void {
+/**
+ * 对应 _reprice_unpriced_costs：账本某天（连同各来源）里，没有公开价的模型成本清零，
+ * 查得到价的按 token × 现价重算。旧版按 Opus 兜底猜出来的美元在这里一并改对。
+ * WorkBuddy / Qwen Code 的成本本来就是 token × 单价，全部重算；
+ * Pi 的日志可能自带真实成本，只补原来是 0 的。当天合计按差额调整。
+ */
+export function repriceUnpricedCosts(day: DayRecord, tool: string): void {
   const models = day.models;
   if (isDict(models)) {
     for (const [name, usage] of Object.entries(models)) {
-      if (isDict(usage) && Number(usage.cost || 0) > 0 && !pricingId(name)) {
-        day.cost = Math.max(Number(day.cost || 0) - Number(usage.cost), 0.0);
-        usage.cost = 0.0;
+      if (!isDict(usage)) continue;
+      const old = Number(usage.cost || 0) || 0;
+      const priceId = pricingId(name);
+      let next: number;
+      if (!priceId) next = 0.0;
+      else if (old > 0 && tool === "pi") continue;
+      else {
+        const p = rawPrice(priceId);
+        const out = (Number(usage.out || 0) || 0) + (tool === "qwencode" ? (Number(usage.reason || 0) || 0) : 0);
+        next = ((Number(usage.in || 0) || 0) * p.in + out * p.out
+          + (Number(usage.cr || 0) || 0) * p.cache_read
+          + (Number(usage.cw || 0) || 0) * p.cache_write) / 1e6;
+      }
+      if (next !== old) {
+        usage.cost = next;
+        day.cost = Math.max((Number(day.cost || 0) || 0) + next - old, 0.0);
       }
     }
   }
   for (const source of Object.values(isDict(day._sources) ? day._sources : {})) {
-    if (isDict(source)) dropUnpricedCosts(source);
+    if (isDict(source)) repriceUnpricedCosts(source, tool);
   }
 }
 
@@ -438,7 +460,7 @@ export function prepareUnpricedCostLedger(tool: string): void {
   const schemaKey = `${tool}_unpriced_schema`;
   if (ledger[schemaKey] === UNPRICED_COST_SCHEMA) return;
   for (const day of Object.values(ledger.tools?.[tool] || {})) {
-    if (isDict(day)) dropUnpricedCosts(day);
+    if (isDict(day)) repriceUnpricedCosts(day, tool);
   }
   ledger[schemaKey] = UNPRICED_COST_SCHEMA;
   memo.dirty = true;

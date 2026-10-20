@@ -7,7 +7,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { HOME, isDirectory } from "../core/paths";
 import { Bounds, RangeKey, RANGE_KEYS, classifyDay, dayKey } from "../core/ranges";
-import { priceFor } from "../core/price";
+import { CLAUDE_LONG_PROMPT_TIERS, cachedEntryHasPricingChange, priceFor, resolveId } from "../core/price";
 import { ledgerFileSources, ledgerReconcile } from "../core/ledger";
 import { ClaudeRangeOut, claudeRange } from "../core/model";
 import { walkFiles, forEachLine } from "../core/fsutil";
@@ -75,8 +75,12 @@ export function claudeEventCost(event: Pick<ClaudeEvent, "model" | "in" | "out" 
   const writeCost = w5 === null && w1 === null
     ? (int(event.cw) / 1e6) * p.write5m
     : (int(w5) / 1e6) * p.write5m + (int(w1) / 1e6) * p.write1h;
-  return (int(event.in) / 1e6) * p.in + (int(event.out) / 1e6) * p.out
+  let cost = (int(event.in) / 1e6) * p.in + (int(event.out) / 1e6) * p.out
     + (int(event.cr) / 1e6) * p.cache_read + writeCost;
+  // 长 prompt 档位：提示 = 输入 + 缓存读 + 缓存写，超限后整次请求乘倍数
+  const tier = CLAUDE_LONG_PROMPT_TIERS[resolveId(event.model) ?? ""];
+  if (tier && int(event.in) + int(event.cr) + int(event.cw) > tier[0]) cost *= tier[1];
+  return cost;
 }
 
 /** 对应 _claude_usage()：只取 type=assistant 且带 message.usage 的行 */
@@ -211,9 +215,31 @@ function parseFile(file: string): { events: ClaudeEvent[]; proj: string | null }
   return { events: dedupeClaudeEvents(events.map((e) => [file, e] as [string, ClaudeEvent])).map(([, e]) => e), proj };
 }
 
+/** 对应 _reprice_claude_events()：只碰命中变更模型的文件，逐事件按新价重算缓存里的 cost。 */
+function repriceClaudeEvents(fc: Record<string, FileEntry>, changedModels: Array<string | null>): boolean {
+  let changed = false;
+  for (const entry of Object.values(fc)) {
+    if (!cachedEntryHasPricingChange(entry, changedModels)) continue;
+    for (const event of entry.events ?? []) {
+      const cost = claudeEventCost(event);
+      // Python 用 math.isclose(rel_tol=0, abs_tol=1e-12)：只按绝对容差判"变没变"，
+      // 否则浮点最后一位抖一下就把整批事件标脏，下一轮又白算一遍。
+      if (Math.abs(Number(event.cost ?? 0) - cost) > 1e-12) {
+        event.cost = cost;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 /** 对应 scan_claude()：历史账本已接 ledger_reconcile（转录被清理的天用 ~/.tokei/ledger.json 的日快照回补，来源按文件名记账） */
 export function scanClaude(bounds: Bounds, cache: Record<string, any>): ClaudeScanResult {
   const fc: Record<string, FileEntry> = (cache.claude ??= {});
+  // 对应 scan_claude 开头那段 _pricing_changed 判定：价目表这轮动过，先把缓存里每个文件
+  // 预存的事件成本按新价重算，后面无论文件重不重新解析，日账拿到的都是新成本。
+  const repriced = !!cache._pricing_changed
+    && repriceClaudeEvents(fc, Array.isArray(cache._pricing_changed_models) ? cache._pricing_changed_models : []);
   const buckets = Object.fromEntries(RANGE_KEYS.map((k) => [k, emptyBucket()])) as Record<RangeKey, ClaudeBucket>;
 
   if (!isDirectory(CLAUDE_DIR)) {
@@ -255,6 +281,9 @@ export function scanClaude(bounds: Bounds, cache: Record<string, any>): ClaudeSc
   for (const file of Object.keys(fc)) {
     if (!seen.has(file)) delete fc[file];
   }
+
+  // 对应 2594：本轮真的重算过缓存里的事件成本，标脏让下游（额度详情）别复用旧快照
+  if (repriced) cache._dirty = true;
 
   const allEvents: Array<[string, ClaudeEvent]> = [];
   for (const [file, entry] of Object.entries(fc)) {

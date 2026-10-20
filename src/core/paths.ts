@@ -123,12 +123,29 @@ export function isDirectory(p?: string | null): boolean {
   }
 }
 
-/** 对应 _writable_path：优先 ~/.tokei/ 下的副本，其次资源目录，最后 ~/.tokei 路径。 */
+/**
+ * 对应 _writable_path：优先 ~/.tokei/ 下的副本，其次资源目录，最后 ~/.tokei 路径。
+ * 原版在 Windows/打包态会先把资源里那一份复制到 ~/.tokei 再返回副本（usage.30s.py:261-273）——
+ * 抓价要往这个文件里写，安装目录多半不可写，不复制就只能整个跳过。
+ * 复制必须带上源的 mtime：24 小时抓价水位读的就是这个时间，而 Node 的 copyFileSync 不保留，
+ * 不补 utimes 的话新装完副本时间是「现在」，自动抓价要白等一整天才跑第一趟。
+ */
 export function writablePath(name: string, resourceDir: string): string {
   const user = path.join(TOKEI_DIR, name);
   if (isFile(user)) return user;
   const base = path.join(resourceDir, name);
-  if (isFile(base)) return base;
+  if (isFile(base)) {
+    try {
+      fs.mkdirSync(TOKEI_DIR, { recursive: true });
+      fs.copyFileSync(base, user);
+      const stat = fs.statSync(base);
+      fs.utimesSync(user, stat.atime, stat.mtime);
+    } catch {
+      // 复制不动（只读介质、并发抢写）就退回用原件，别把价目表整个读没了
+      return base;
+    }
+    return user;
+  }
   return user;
 }
 

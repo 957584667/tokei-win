@@ -26,27 +26,74 @@ export const TOOL_COLORS: Record<string, string> = {
 export interface Metric {
   /** 「今日总量」是额度全为空时的兜底项，对应 MenuBarMetricKind.total */
   source: QuotaSourceId | "total";
-  /** 剩余百分比 0-100，刻度环按它画弧；总量项没有剩余额度，给 null（原版也是 nil） */
+  /** 剩余百分比，刻度环按它画弧；总量项、以及「窗口已重置」那一项没有剩余额度，给 null（原版也是 nil） */
   remaining: number | null;
-  /** 显示文本，原版是 "%.0f" */
+  /** 显示文本，原版是 "%.0f"；窗口翻篇后写「—」，扫描还没回来时写「…」 */
   value: string;
   color: string;
   /** 5 小时窗口画沙漏，周窗口画横块；Kimi 订阅与 Grok 没有确定窗口，给 null */
   window: "hour" | "week" | null;
+  /** 读数过期：数字照常占位、只是变淡，不整项消失（MenuBarStyle.swift:177-199） */
+  stale?: boolean;
 }
 
 const HEIGHT = 16;
 const GLYPH = 18;
-const FONT_SIZE = 11;
-/** Segoe UI 11px 的数字宽度实测约 6.2px；测试里用它核对不溢出 */
-const DIGIT_WIDTH = 6.4;
-const SPACING = 3;
+/** 对应 valueFont = monospacedDigitSystemFont(ofSize: 12, weight: .semibold)：12pt 半粗 + 等宽数字 */
+const FONT_SIZE = 12;
+/** 12px 数字的墨迹实测高 9px、上沿在基线上方 9px、下沿 1px，所以基线取 cy+5 刚好居中 */
+const BASELINE = 5;
+/** 过期读数的透明度：还看得清，但一眼能和新鲜读数分开（staleAlpha） */
+const STALE_ALPHA = 0.45;
+/** 圆点档的 ●：正文档 7pt、仅图标档 8pt（MenuBarStyle.swift:733 / 801） */
+const BULLET_SIZE = 7;
+const BULLET_ICON_SIZE = 8;
+/**
+ * 逐字符前进宽度，单位 px@12pt，用 headless Edge 实测（scratch/panel-tray-tnum.html）。
+ * 托盘宽度必须自己算准：算少了数字会被裁掉，算多了档位之间会空出一截。
+ */
+const ADVANCE: Record<string, number> = {
+  " ": 3.3, "·": 2.91, ".": 2.91, "—": 12, "…": 9.77,
+  K: 7.34, B: 7.25, M: 11.09,
+  // ● 7px 加粗实测 4.23，折回 12pt 基准（× 12/7）
+  "●": 7.25,
+};
+/** 开了 tabular-nums 之后所有数字同宽，实测 6.67（原版就是 monospacedDigit） */
+const DIGIT_ADVANCE = 6.67;
+/** 档内符号与数字之间空一格，两个额度之间空两格（appendSpace / appendSeparator("  ")） */
+const SPACE = ADVANCE[" "];
+
+function round(v: number): number {
+  return Math.round(v * 100) / 100;
+}
 
 function rgba(hex: string, alpha: number): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r},${g},${b},${alpha})`;
+}
+
+/** 过期读数把墨色乘 0.45，对应 NSColor.withAlphaComponent(staleAlpha) */
+function ink(color: string, stale: boolean | undefined): string {
+  return stale ? rgba(color, STALE_ALPHA) : color;
+}
+
+/** 一段文字的水平占位：CJK 全角按 1em，其余查实测表，表里没有的按数字宽 */
+function advance(value: string, size: number): number {
+  let total = 0;
+  for (const ch of value) {
+    total += ADVANCE[ch]
+      ?? (/\d/.test(ch) ? DIGIT_ADVANCE
+        : (ch.codePointAt(0) ?? 0) >= 0x2e80 ? FONT_SIZE : DIGIT_ADVANCE);
+  }
+  return total * (size / FONT_SIZE);
+}
+
+function textRun(x: number, baseline: number, scale: number, value: string, fill: string, size: number, weight: number): string {
+  return `<text x="${round(x)}" y="${round(baseline)}" style="font-variant-numeric:tabular-nums" `
+    + `font-family='Segoe UI, Microsoft YaHei, sans-serif' font-size="${round(size * scale)}" `
+    + `font-weight="${weight}" fill="${fill}">${escapeXml(value)}</text>`;
 }
 
 /** 沙漏 = 5 小时窗口；横块 = 周窗口。几何来自 drawWindowMark */
@@ -63,12 +110,11 @@ function windowMark(window: "hour" | "week", cx: number, cy: number, scale: numb
   return `<rect x="${round(cx - hw)}" y="${round(cy - hh)}" width="${round(hw * 2)}" height="${round(hh * 2)}" fill="${color}"/>`;
 }
 
-function round(v: number): number {
-  return Math.round(v * 100) / 100;
-}
-
 /** 刻度环：底环 22% 透明 + 从 12 点顺时针的剩余弧。progress 下限 0.04 与原版一致 */
-function gauge(m: Metric, cx: number, cy: number, size: number, showWindow: boolean): string {
+function gauge(m: Metric, cx: number, cy: number, size: number, showWindow: boolean, override?: string): string {
+  // 底环那层是 withAlphaComponent(0.22)，直接替换 alpha、不跟过期档的 0.45 相乘，所以照常浓
+  const base = override ?? m.color;
+  const c = override ? base : ink(base, m.stale);
   const scale = size / 11;
   const r = 4.0 * scale;
   const sw = 1.45 * scale;
@@ -80,17 +126,16 @@ function gauge(m: Metric, cx: number, cy: number, size: number, showWindow: bool
     ? `M ${round(cx)},${round(cy - r)} A ${round(r)},${round(r)} 0 1 1 ${round(cx)},${round(cy + r)} A ${round(r)},${round(r)} 0 1 1 ${round(cx)},${round(cy - r)}`
     : `M ${round(cx)},${round(cy - r)} A ${round(r)},${round(r)} 0 ${large} 1 ${round(end.x)},${round(end.y)}`;
   const parts = [
-    `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(r)}" fill="none" stroke="${rgba(m.color, 0.22)}" stroke-width="${round(sw)}"/>`,
-    `<path d="${arc}" fill="none" stroke="${m.color}" stroke-width="${round(sw)}" stroke-linecap="round"/>`,
+    `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(r)}" fill="none" stroke="${rgba(base, 0.22)}" stroke-width="${round(sw)}"/>`,
+    `<path d="${arc}" fill="none" stroke="${c}" stroke-width="${round(sw)}" stroke-linecap="round"/>`,
   ];
-  if (showWindow && m.window) parts.push(windowMark(m.window, cx, cy, scale, m.color));
+  if (showWindow && m.window) parts.push(windowMark(m.window, cx, cy, scale, c));
   return parts.join("");
 }
 
-/** 圆点样式用的独立窗口符号，不带圆环（windowGlyph） */
-function standaloneGlyph(m: Metric, cx: number, cy: number, size: number): string {
-  if (!m.window) return `<circle cx="${round(cx)}" cy="${round(cy)}" r="${round(size * 0.3)}" fill="${m.color}"/>`;
-  return windowMark(m.window, cx, cy, size / 11 * 1.7, m.color);
+/** windowGlyph：不带圆环的独立沙漏符号，「圆点」档只给 5 小时窗口用（MenuBarStyle.swift:404-417） */
+function windowGlyph(size: number, cx: number, cy: number, color: string): string {
+  return windowMark("hour", cx, cy, size / 11 * 1.7, color);
 }
 
 /** ribbonT：横杆贝塞尔 + 竖干贝塞尔。Swift 的 y 轴向上，这里整体翻转 */
@@ -202,14 +247,16 @@ export function layout(input: TrayRenderInput): { width: number; parts: string[]
   const parts: string[] = [];
   let x = 2 * scale;
   const cy = HEIGHT * scale / 2;
+  const baseline = cy + BASELINE * scale;
 
-  const text = (value: string, fill: string) => {
-    const w = value.length * DIGIT_WIDTH * scale;
-    parts.push(`<text x="${round(x)}" y="${round(cy + FONT_SIZE * scale * 0.36)}" font-family='Segoe UI, Microsoft YaHei, sans-serif' font-size="${round(FONT_SIZE * scale)}" font-weight="600" fill="${fill}">${escapeXml(value)}</text>`);
-    x += w;
+  const drawText = (value: string, fill: string, size = FONT_SIZE, weight = 600) => {
+    parts.push(textRun(x, baseline, scale, value, fill, size, weight));
+    x += advance(value, size) * scale;
   };
-  const gap = () => { x += SPACING * scale; };
-  const glyphBox = GLYPH * scale;
+  const gap = (spaces = 1) => { x += SPACE * spaces * scale; };
+  // 图形本身是 18 单位，但画布只有 16px 高：按任务栏高度等比放进去，
+  // 不然树干、轨道这类顶到 18 的笔迹会被裁掉最后一丝（headless Edge 出图实测过）。
+  const glyphBox = HEIGHT * scale;
 
   if (input.density === "icon") {
     x = iconOnly(parts, input, focused, x, cy, scale, glyphBox, theme);
@@ -219,7 +266,13 @@ export function layout(input: TrayRenderInput): { width: number; parts: string[]
   // 「彩色」「数字」两档按工具色上色，其余跟随任务栏配色（原版是 template 图自动反色）
   const tint = (m: Metric) => (input.style === "color" || input.style === "compact" ? m.color : theme.text);
   const leading = (image: string) => { parts.push(place(image, x, cy, glyphBox, scale)); x += glyphBox; if (visible.length) gap(); };
-  const numberRow = () => visible.forEach((m, i) => { if (i) text(" · ", theme.separator); text(m.value, tint(m)); });
+  const numberRow = () => visible.forEach((m, i) => { if (i) drawText(" · ", theme.separator); drawText(m.value, ink(tint(m), m.stale)); });
+
+  // 刻度环/圆点/数字三档落在 Swift 的公共分支上（MenuBarStyle.swift:689-691）：
+  // 防休眠时数字前先来一枚签名角标，换档时这条位子的有无就是肉眼可见的差异。
+  if (input.keepAwake && (input.style === "symbols" || input.style === "dots" || input.style === "compact")) {
+    leading(signature(true));
+  }
 
   switch (input.style) {
     case "system":
@@ -240,38 +293,42 @@ export function layout(input: TrayRenderInput): { width: number; parts: string[]
       break;
     case "symbols":
       visible.forEach((m, i) => {
-        if (i) gap();
+        if (i) gap(2);
         const size = 11 * scale;
         parts.push(gauge(m, x + size / 2, cy, size, true));
-        x += size; gap();
-        text(m.value, tint(m));
+        x += size;
+        gap();
+        drawText(m.value, ink(theme.text, m.stale));
       });
       break;
     case "dots":
       visible.forEach((m, i) => {
-        if (i) gap();
-        const size = 9 * scale;
-        // 有窗口的画沙漏/横块，没有窗口的（Kimi 订阅、Grok）退化成圆点
-        parts.push(m.window
-          ? standaloneGlyph(m, x + size / 2, cy, size)
-          : `<circle cx="${round(x + size / 2)}" cy="${round(cy)}" r="${round(2.5 * scale)}" fill="${m.color}"/>`);
-        x += size; gap();
-        text(m.value, tint(m));
+        if (i) gap(2);
+        // 只有 5 小时窗口画沙漏，周窗口和没有窗口的（Kimi 订阅、Grok、今日总量）都是一颗 ●
+        // ——原版就是靠「竖符号 vs 圆点」分档，横块只在刻度环内部出现（MenuBarStyle.swift:729-738）
+        if (m.window === "hour") {
+          const size = 9 * scale;
+          parts.push(windowGlyph(size, x + size / 2, cy, ink(m.color, m.stale)));
+          x += size;
+        } else {
+          drawText("●", ink(m.color, m.stale), BULLET_SIZE, 700);
+        }
+        gap();
+        drawText(m.value, ink(theme.text, m.stale));
       });
       break;
     case "compact":
-      if (input.keepAwake) leading(signature(true));
       numberRow();
       break;
   }
 
-  // 没有任何额度可画时（额度来源全关、或今日总量也是 0）：原版只在
-  // 经典白/刻度/圆点/数字 四档退回品牌图（MenuBarStyle.swift:678 的 fallbackIcon 分支），
-  // 彩色/星轨/椰影 在更早的分支里就带着自己的图形 return 了，所以换样式看得出变化。
-  if (!visible.length && input.style !== "color" && input.style !== "artistic" && input.style !== "palm") {
+  // 没有任何额度可画时（额度来源全关、或今日总量也是 0）：原版只在刻度环/圆点/数字
+  // 这三档退回品牌图（MenuBarStyle.swift:700 的 fallbackIcon 分支），那张是不带防休眠角标的
+  // template 图；彩色/星轨/椰影 在更早的分支里就带着自己的图形 return 了，所以换样式看得出变化。
+  if (!visible.length && (input.style === "symbols" || input.style === "dots" || input.style === "compact")) {
     parts.length = 0;
     x = 2 * scale;
-    parts.push(place(brand(theme.glyph, input.keepAwake), x, cy, glyphBox, scale));
+    parts.push(place(brand(theme.glyph, false), x, cy, glyphBox, scale));
     return { width: Math.ceil(x + glyphBox + 2 * scale), parts };
   }
   return { width: Math.ceil(x + 2 * scale), parts };
@@ -279,6 +336,7 @@ export function layout(input: TrayRenderInput): { width: number; parts: string[]
 
 function iconOnly(parts: string[], input: TrayRenderInput, focused: Metric | null, x: number, cy: number, scale: number, glyphBox: number, theme: TrayTheme): number {
   const style = input.style;
+  const baseline = cy + BASELINE * scale;
   if (style === "artistic") { parts.push(place(starTrail(input.keepAwake, theme.glyph), x, cy, glyphBox, scale)); return x + glyphBox; }
   if (style === "palm") { parts.push(place(palm(input.keepAwake), x, cy, glyphBox, scale)); return x + glyphBox; }
   if (input.keepAwake) {
@@ -290,12 +348,17 @@ function iconOnly(parts: string[], input: TrayRenderInput, focused: Metric | nul
     case "system": parts.push(place(brand(theme.glyph, false), x, cy, glyphBox, scale)); return x + glyphBox;
     case "compact": parts.push(place(brand(theme.glyph, false), x, cy, glyphBox, scale)); return x + glyphBox;
     case "color": parts.push(place(signature(false), x, cy, glyphBox, scale)); return x + glyphBox;
-    case "symbols": parts.push(gauge(focused ?? { source: "claude5h", remaining: 100, value: "", color: theme.glyph, window: null }, x + 8 * scale, cy, 16 * scale, true)); return x + 16 * scale;
+    // 仅图标档的刻度环是 template 单色图，不跟着额度上色（iconOnlyImage 没传 color）
+    case "symbols": parts.push(gauge(focused ?? { source: "total", remaining: null, value: "", color: theme.glyph, window: null }, x + 8 * scale, cy, 16 * scale, true, theme.glyph)); return x + 16 * scale;
+    // 原版的「仅图标 + 圆点」不给图，而是把符号写进标题：5 小时窗口 10pt 沙漏，其余 8pt ●
     case "dots": {
-      const size = 10 * scale;
-      if (focused?.window) { parts.push(standaloneGlyph(focused, x + size / 2, cy, size)); return x + size; }
-      parts.push(`<circle cx="${round(x + size / 2)}" cy="${round(cy)}" r="${round(3 * scale)}" fill="${focused?.color ?? theme.glyph}"/>`);
-      return x + size;
+      if (focused?.window === "hour") {
+        const size = 10 * scale;
+        parts.push(windowGlyph(size, x + size / 2, cy, focused.color));
+        return x + size;
+      }
+      parts.push(textRun(x, baseline, scale, "●", focused?.color ?? theme.separator, BULLET_ICON_SIZE, 700));
+      return x + advance("●", BULLET_ICON_SIZE) * scale;
     }
     default: parts.push(place(brand(theme.glyph, false), x, cy, glyphBox, scale)); return x + glyphBox;
   }
@@ -311,7 +374,10 @@ export function visibleMetrics(metrics: Metric[], density: MenuBarDensity): Metr
 export function focusMetric(metrics: Metric[]): Metric | null {
   // 只有「剩余百分比」可比的项参与选最紧的；今日总量项没有剩余额度（原版 focusedMetric 只看 quota）
   const quotas = metrics.filter((m): m is Metric & { remaining: number } => typeof m.remaining === "number");
-  if (quotas.length) return quotas.reduce((a, b) => (a.remaining < b.remaining ? a : b));
+  // 先在新鲜读数里挑剩得最少的，别让一个过期的旧数字把真的紧张额度挤掉（MenuBarStyle.swift:809）
+  const fresh = quotas.filter((m) => !m.stale);
+  const pool = fresh.length ? fresh : quotas;
+  if (pool.length) return pool.reduce((a, b) => (a.remaining <= b.remaining ? a : b));
   return metrics[0] ?? null;
 }
 

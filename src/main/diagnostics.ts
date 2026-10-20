@@ -4,6 +4,9 @@
  * macOS 是起 python3 跑采集脚本、拿它的 stdout。Windows 这边没有外挂脚本，
  * 同一份引擎编成 dist/cli.js，所以起 `ELECTRON_RUN_AS_NODE` 的自己跑它，
  * 拿到的 stdout 与 Python 的 --json 同形（工具键 + _errors + _pricing），报告逐行照抄原版。
+ *
+ * 文件末尾那个 runPriceUpdateScript 是同一条「起子进程跑 cli.js」的路，服务价格表段的
+ * --update-unknown：两边只差超时与 argv，进程隔离的语义一样。
  */
 import { execFile } from "child_process";
 import * as fs from "fs";
@@ -123,4 +126,36 @@ export function runCollectorScript(
 /** 诊断跑的是编译产物 dist/cli.js；RESOURCE_DIR 在 index.ts 是上一级，这里同一套定位 */
 export function collectorEntry(): string {
   return path.resolve(__dirname, "..", "cli.js");
+}
+
+/**
+ * 价格表段「查漏补缺」的那次子进程（对应 runPriceUpdate PV:4193-4203：/usr/bin/env python3
+ * usage.30s.py --update-unknown）。放子进程有两个理由：扫一遍本机日志是同步重活，放主进程会冻面板；
+ * 而且原版的 stdout JSON 就是靠进程隔离才「只此一份」的，我们也不在进程里顺手改状态。
+ * 与 runCollectorScript 的区别是不设超时 —— 原版 waitUntilExit() 会一直等，不发明终止条件。
+ */
+export function runPriceUpdateScript(cliPath: string, execPath: string, flag: string): Promise<ScriptResult> {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    execFile(
+      execPath, [cliPath, flag],
+      {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+        maxBuffer: 32 * 1024 * 1024,
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        const elapsed = (Date.now() - started) / 1000;
+        const text = (value: string | Buffer) => String(value ?? "");
+        if (error && (error as any).code === "ENOENT") {
+          resolve({ exitCode: -1, timedOut: false, elapsed, stdout: "", stderr: error.message });
+          return;
+        }
+        const code = !error ? 0
+          : typeof (error as any).code === "number" ? (error as any).code
+            : (error as any).signal ? 15 : 1;
+        resolve({ exitCode: code, timedOut: false, elapsed, stdout: text(stdout), stderr: text(stderr) });
+      },
+    );
+  });
 }

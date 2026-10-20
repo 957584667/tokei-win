@@ -8,7 +8,7 @@
  * 自启用 setLoginItemSettings（等价 SMAppService）；久坐用 powerMonitor.getSystemIdleTime
  * （等价 IOHIDSystem HIDIdleTime）。
  */
-import { app, BrowserWindow, Tray, Menu, Notification, ipcMain, screen, shell, powerSaveBlocker, powerMonitor, safeStorage, nativeImage, clipboard, ClipboardItem } from "electron";
+import { app, BrowserWindow, Tray, Menu, Notification, ipcMain, screen, shell, powerSaveBlocker, powerMonitor, safeStorage, nativeImage, clipboard } from "electron";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -19,12 +19,19 @@ import { displayTokenTotal } from "../core/model";
 import { traySvg, Metric, TrayTheme, LIGHT_THEME } from "./trayIcon";
 import { closeRasterWindow, rasterizeTray, trayRasterStatus } from "./trayRaster";
 import { refreshTaskbarTheme, taskbarTheme, taskbarThemeStale } from "./theme";
-import { MenuBarStyle, MenuBarDensity, QuotaSourceId, Settings, defaultSettings, loadSettings, saveSettings, quotaSourceEnabled, QUOTA_SOURCE_ORDER, configFlag } from "./settings";
+import { MenuBarStyle, MenuBarDensity, QuotaSourceId, Settings, defaultSettings, loadSettings, saveSettings, quotaSourceEnabled, QUOTA_SOURCE_ORDER, configFlag, PANEL_FONT_SCALE } from "./settings";
 import {
-  PROVIDER_SECRETS, ProviderSecret, ZAI_REGIONS, clean, isProviderSecret, providerQuotaFlags, validSub2APIBaseURL,
+  PROVIDER_SECRETS, ProviderSecret, ZAI_REGIONS, clean, isProviderSecret, quotaMirror, validSub2APIBaseURL,
 } from "./providers";
 import { makeTrailOps } from "./trailOps";
-import { collectorEntry, formatDiagnostics, runCollectorScript } from "./diagnostics";
+import { collectorEntry, formatDiagnostics, runCollectorScript, runPriceUpdateScript } from "./diagnostics";
+import { autoFetchPricing, runPriceUpdate } from "./pricingFetch";
+import { LAST_USAGE_FILE, loadCachedUsage } from "./usageCache";
+import { ActivityReporter } from "./activityReporter";
+import { UPDATE_CHECK_INTERVAL, Updater } from "./updater";
+import { PANEL_PROVISIONAL, fitPanelSize } from "./panelPlacement";
+import { copyShareImage } from "./shareImage";
+import { buildShareSpec } from "../core/shareCard";
 import { collectQuotas, makeQuotaDeps } from "./quota";
 import { KimiLiveResult, kimiQuotaValues } from "./quota/kimiLive";
 import { createKeepAwake, readWindowsBattery } from "./keepAwake";
@@ -37,14 +44,14 @@ import {
 
 const RESOURCE_DIR = path.resolve(__dirname, "..", "..", "resources");
 const RENDERER_HTML = path.resolve(__dirname, "..", "..", "renderer", "index.html");
-const LAST_USAGE_FILE = path.join(TOKEI_DIR, "last_usage.json");
 /** SitReminder.swift:12 的 idleAwayThreshold：空闲满 5 分钟算离开电脑，连续用机计时清零 */
 const SIT_AWAY_SECONDS = 300;
 
 const SOURCE_META: Record<QuotaSourceId, { label: string; color: string; window: "hour" | "week" | null }> = {
   claude5h: { label: "Claude 5h", color: "#eb8566", window: "hour" },
   claudeWeek: { label: "Claude 周", color: "#eb8566", window: "week" },
-  claudeFable: { label: "Claude Fable", color: "#f5ae38", window: "week" },
+  // Fable 与 Claude 周同为周窗口，只能靠颜色分开，所以用系统橙（与面板额度行同色，见 app.js 的 quotaRow）
+  claudeFable: { label: "Claude Fable", color: "#ff9f0a", window: "week" },
   codex5h: { label: "Codex 5h", color: "#6badfa", window: "hour" },
   codexWeek: { label: "Codex 周", color: "#6badfa", window: "week" },
   kimi5h: { label: "Kimi 5h", color: "#33c7a8", window: "hour" },
@@ -71,6 +78,14 @@ interface Runtime {
   visible: boolean;
   scanFailed: boolean;
   traySeq: number;
+  /** 对应 store.retryCount：只在手上还没有任何数据时累加，扫成功一轮就归零 */
+  retryCount: number;
+  /** 对应 store.quotaDetailPrewarmPending：打开面板那一发刷新完要把额度详情焐上 */
+  quotaPrewarmPending: boolean;
+  /** 登录项回读失败的原因，空串表示正常（对应 LoginItemManager.errorMessage） */
+  loginError: string;
+  /** 手上这份读数来自上一轮落盘的缓存、还没被本轮扫描覆盖（对应 primeCachedUsage 那句「后台更新中」） */
+  primed: boolean;
 }
 
 function boot(): void {
@@ -78,6 +93,7 @@ function boot(): void {
     tray: null, panel: null, payload: null, errors: {},
     refreshInFlight: false, refreshPending: false, lastRefreshMs: 0, timer: null,
     visible: false, scanFailed: false, traySeq: 0,
+    retryCount: 0, quotaPrewarmPending: false, loginError: "", primed: false,
   };
   const scanCache: Record<string, any> = {};
   const trailOps = makeTrailOps();
@@ -106,6 +122,26 @@ function boot(): void {
    * 所以这里只在渲染进程进「面板」页时算，30 秒新鲜期内复用。
    */
   const dashboard = new DashboardStore({ cache: () => scanCache });
+  // 对应 ActivityReporter.shared：每次启动只试一次，开关关掉时连请求都不建
+  const activity = new ActivityReporter();
+  /**
+   * 对应 Updater.shared：启动查一次，之后每 6 小时一次（main.swift:353/371）。
+   * 下载并校验通过后交给系统安装器，随后退出本进程。本地验证版（TOKEI_LOCAL_BUILD=1）
+   * 只允许手动检查——和 macOS 的 TokeiLocalBuild 同一个用意，别被线上旧包悄悄换掉。
+   */
+  const updater = new Updater({
+    currentVersion: app.getVersion(),
+    isLocalBuild: process.env.TOKEI_LOCAL_BUILD === "1",
+    launchInstaller: async (file) => {
+      const error = await shell.openPath(file);
+      if (error) throw new Error(error);
+    },
+    onQuit: () => app.quit(),
+    onState: (next) => {
+      if (state.panel && !state.panel.isDestroyed()) state.panel.webContents.send("update", next);
+    },
+  });
+  let updateTimer: ReturnType<typeof setInterval> | null = null;
   // 对应 main.swift 的 dashboardPrewarmStarted：整轮扫描结束后只焐一次，之后交给页面自己按区间要
   let dashboardPrewarmStarted = false;
   // 防休眠：断言活在主进程，面板关掉也继续生效（对应 macOS 的 KeepAwake 单例）
@@ -133,7 +169,45 @@ function boot(): void {
     return Math.max(wanted, state.lastRefreshMs * 2);
   }
 
-  async function refresh(retries = 3): Promise<void> {
+  /** 重试那一档的表头文案来源（对应 store.lastUpdated = "加载中…(N)"）：没有 payload 可推时单独发 */
+  function pushLoadStatus(status: { retry?: number; failed?: boolean }): void {
+    if (state.panel && !state.panel.isDestroyed()) state.panel.webContents.send("load-status", status);
+  }
+
+  /**
+   * 对应 prewarmQuotaDetailIfReady(main.swift:158)：只在「面板开着」且这一发被
+   * 打开面板那一刻点过名时取，重入由 QuotaDetailStore 自己的门闩挡。
+   */
+  function consumeQuotaPrewarm(): void {
+    if (!state.quotaPrewarmPending || !state.visible) return;
+    state.quotaPrewarmPending = false;
+    void quotaDetail.load(true);
+  }
+
+  /** 对应 main.swift 的 retryCount < 3：重试三发，每发间隔 3 秒 */
+  const RETRY_LIMIT = 3;
+
+  /**
+   * 对应 primeCachedUsage（main.swift:55-70）：起进程先把上一轮落盘的读数垫进内存，
+   * 托盘从第一秒起就有数字，不用干等第一趟扫描（首刷在数据量大的机器上要走十几秒）。
+   * 原版排在启动序列的最后一环之前、refresh() 之前，垫完只重画托盘。
+   *
+   * 垫之前先把 `_` 开头的内部键全删掉、并重算 Claude 那三路额度的过期标记，
+   * 这两件都在 loadCachedUsage() 里做（对应 DataLoader.loadCachedUsage）。
+   *
+   * 副作用和原版一样：usage 不再是 nil，第一趟扫描失败时 willRetry 判假，直接落到
+   * 「缓存数据 · 等待刷新」沿用旧读数，而不是重试三发。同步那半段（loadPeers + merge）
+   * 在 Git 多设备同步接上之前没有对应物，见任务 #27。
+   */
+  function primeCachedUsage(): void {
+    if (state.payload) return;
+    const cached = loadCachedUsage(LAST_USAGE_FILE);
+    if (!cached) return;
+    state.payload = cached;
+    state.primed = true;
+  }
+
+  async function refresh(): Promise<void> {
     if (state.refreshInFlight) {
       state.refreshPending = true;
       return;
@@ -172,15 +246,33 @@ function boot(): void {
       state.lastRefreshMs = Date.now() - started;
       state.refreshInFlight = false;
     }
+    // 这一发有结果了（成或败都算）：表头从「后台更新中」交回给下面三条分支的文案，
+    // 对应 performRefresh 回调里每一次 lastUpdated 赋值都会盖掉 prime 那一句。
+    state.primed = false;
 
     if (!payload) {
-      // 对应 macOS 版连续 3 次失败才提示：托盘不闪、面板保留旧数据
-      if (retries > 0) {
-        setTimeout(() => refresh(retries - 1), 3_000);
+      // 对应 main.swift:104-118：只有手上还没有任何数据才重试（有旧读数就安静沿用），
+      // 连续 3 次都没扫出来才提示失败；重试期间表头写「加载中…(N)」，托盘不闪。
+      const willRetry = !state.payload && state.retryCount < RETRY_LIMIT;
+      if (willRetry) {
+        state.retryCount += 1;
+        pushLoadStatus({ retry: state.retryCount });
+        // 已经排着一发（refreshPending）就让它接着重试，别再排第二遍
+        if (!state.refreshPending) setTimeout(() => void refresh(), 3_000);
+        consumeQuotaPrewarm();
         return;
       }
-      payload = state.payload ?? loadJson<Record<string, any>>(LAST_USAGE_FILE, null as any);
+      payload = state.payload ?? loadCachedUsage(LAST_USAGE_FILE);
+      if (!payload) {
+        // 一个读数都没有：面板整页落到失败态。这里不能推一份空对象过去，
+        // 否则渲染进程会把「没有数据」当成「有缓存」显示成「缓存数据 · 等待刷新」。
+        pushLoadStatus({ failed: true });
+        consumeQuotaPrewarm();
+        updateTray();
+        return;
+      }
     } else {
+      state.retryCount = 0;
       // 对应 main.swift 的 recordQuotaHistory(local)：只有真扫出来的这一轮才留快照，
       // 失败回退到缓存那份不能重复灌进曲线，否则空档会被填成平台。
       quotaHistory.record(captureFromPayload(payload));
@@ -198,6 +290,7 @@ function boot(): void {
       // 与快照落盘之后，否则算的是上一轮的读数、mtime 年龄还会判成过期。
       if (state.visible) void quotaDetail.load(false);
     }
+    consumeQuotaPrewarm();
 
     updateTray();
     // 面板数据只在没有排队刷新时预热一次（对应 main.swift 的 dashboardPrewarmStarted）：
@@ -207,8 +300,9 @@ function boot(): void {
       void dashboard.load("all", true);
     }
     if (state.panel && !state.panel.isDestroyed()) {
-      // _ok/_at 只给面板定表头文案用（成功盖时间戳、失败退回「缓存数据 · 等待刷新」），
-      // 不落盘：写进 last_usage.json 的那一份是扫描产物，不带读数的成败。
+      // _ok/_at 只给面板定表头文案用（成功盖时间戳、失败退回「缓存数据 · 等待刷新」）。
+      // 成功那一支是先在 payload 上盖好才落盘的，磁盘那份因此带着上一轮的时刻；
+      // 读回来时 loadCachedUsage() 把 `_` 开头的键全剥掉，垫进内存的那份不会把旧时刻冒充本轮。
       state.panel.webContents.send("usage", { ...payload, _ok: !state.scanFailed, _at: Date.now() });
     }
     if (state.refreshPending) {
@@ -218,23 +312,33 @@ function boot(): void {
   }
 
   /**
-   * 对应 MenuBarQuotaSource.metrics(in:)：按 allCases 顺序取「已勾选 + 读数新鲜」的窗口，
-   * 并把「已用百分比」换成「剩余百分比」。
+   * 对应 MenuBarQuotaSource.metrics(in:)：按 allCases 顺序取「已勾选 + 有读数」的窗口，
+   * 并把「已用百分比」换成「剩余百分比」。过期读数照常占位（画淡），不再整项消失。
    */
   function quotaMetrics(payload: Record<string, any> | null, theme: TrayTheme): Metric[] {
-    if (!payload) return [];
+    // 扫描还没回来：状态栏先画一个省略号，不能是空白（main.swift:448-450）
+    if (!payload) return [{ source: "total", remaining: null, value: "…", color: theme.separator, window: null }];
     const out: Metric[] = [];
     for (const id of QUOTA_SOURCE_ORDER) {
       if (!quotaSourceEnabled(settings, id)) continue;
       const reading = readingOf(payload, id);
       if (!reading) continue;
       const meta = SOURCE_META[id];
+      // 读数失真且窗口已经翻篇：那串百分比属于上一个窗口，不能当剩余显示，
+      // 也不能按回满算——网页和别的设备都在用同一份额度（SubscriptionQuotaState.swift:26）。
+      if (reading.stale && hasResetSinceReading(payload, id)) {
+        out.push({ source: id, remaining: null, value: "—", color: meta.color, window: meta.window, stale: true });
+        continue;
+      }
+      // 超额时原版就直接是负数，不做 0-100 钳位（刻度环自己在画法里钳）
+      const remaining = 100 - reading.used;
       out.push({
         source: id,
-        remaining: Math.max(0, Math.min(100, 100 - reading.used)),
-        value: String(Math.round(100 - reading.used)),
+        remaining,
+        value: String(Math.round(remaining)),
         color: meta.color,
         window: meta.window,
+        stale: reading.stale,
       });
     }
     if (out.length) return out;
@@ -248,23 +352,41 @@ function boot(): void {
       : [];
   }
 
-  function readingOf(payload: Record<string, any>, id: QuotaSourceId): { used: number } | null {
-    const claude = payload.claude ?? {};
-    const codex = payload.codex ?? {};
-    const kimi = payload.kimicode ?? {};
-    const grok = payload.grok ?? {};
-    const pick = (used: any, stale: any): { used: number } | null =>
-      typeof used === "number" && !stale ? { used } : null;
+  function readingOf(payload: Record<string, any>, id: QuotaSourceId): { used: number; stale: boolean } | null {
+    const pick = (used: any, stale: any): { used: number; stale: boolean } | null =>
+      typeof used === "number" && Number.isFinite(used) ? { used, stale: !!stale } : null;
     switch (id) {
-      case "claude5h": return pick(claude.q5, claude.q5_stale);
-      case "claudeWeek": return pick(claude.q7, claude.q7_stale);
-      case "claudeFable": return pick(claude.qf, claude.qf_stale);
-      case "codex5h": return pick(codex.p5, codex.p5_stale);
-      case "codexWeek": return pick(codex.pw, codex.pw_stale);
-      case "kimi5h": return pick(kimi.p5, kimi.p5_stale);
-      case "kimiSubscription": return pick(kimi.pw, kimi.pw_stale);
-      case "grok": return pick(grok.pct, grok.stale);
+      case "claude5h": return pick(payload.claude?.q5, payload.claude?.q5_stale);
+      case "claudeWeek": return pick(payload.claude?.q7, payload.claude?.q7_stale);
+      case "claudeFable": return pick(payload.claude?.qf, payload.claude?.qf_stale);
+      case "codex5h": return pick(payload.codex?.p5, payload.codex?.p5_stale);
+      case "codexWeek": return pick(payload.codex?.pw, payload.codex?.pw_stale);
+      case "kimi5h": return pick(payload.kimicode?.p5, payload.kimicode?.p5_stale);
+      case "kimiSubscription": return pick(payload.kimicode?.pw, payload.kimicode?.pw_stale);
+      case "grok": return pick(payload.grok?.pct, payload.grok?.stale);
     }
+  }
+
+  /** 该窗口在 usage.json 里的重置时刻（unix 秒）；采集器给的可能是 ISO 串，统一换算 */
+  function resetOf(payload: Record<string, any>, id: QuotaSourceId): number | null {
+    const raw = ({
+      claude5h: payload.claude?.q5_reset, claudeWeek: payload.claude?.q7_reset, claudeFable: payload.claude?.qf_reset,
+      codex5h: payload.codex?.r5, codexWeek: payload.codex?.rw,
+      kimi5h: payload.kimicode?.r5, kimiSubscription: payload.kimicode?.rw, grok: payload.grok?.reset,
+    } as Record<QuotaSourceId, unknown>)[id];
+    if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+    if (typeof raw === "string") {
+      const n = Number(raw);
+      if (Number.isFinite(n)) return n;
+      const parsed = Date.parse(raw);
+      return Number.isNaN(parsed) ? null : parsed / 1000;
+    }
+    return null;
+  }
+
+  function hasResetSinceReading(payload: Record<string, any>, id: QuotaSourceId): boolean {
+    const reset = resetOf(payload, id);
+    return reset !== null && reset <= Date.now() / 1000;
   }
 
   /** 最近一次真正交给托盘的请求，诊断段用它判断「样式有没有走到出图这一步」 */
@@ -334,10 +456,13 @@ function boot(): void {
     lines.push(`Tokei · 今日 ${formatTokens(today.tokens, zh)} tokens / ${formatUsd(today.cost, today.costCny)}`);
     const all = summarize("all");
     lines.push(`累计 ${formatTokens(all.tokens, zh)} tokens / ${formatUsd(all.cost, all.costCny)}`);
-    // 总量项没有剩余额度，按原版只报「今日 12.3M」（main.swift:476-483）
-    for (const m of metrics) lines.push(m.remaining === null
-      ? `今日 ${m.value}`
-      : `${SOURCE_META[m.source as QuotaSourceId].label} 剩余 ${m.remaining.toFixed(0)}%`);
+    // 逐额度一行（main.swift:479-489）：总量项只报「今日 12.3M」，失真读数要说明是上次读到的，
+    // 窗口翻篇那项干脆没有百分比，只说「已重置，等下一次读数」。
+    for (const m of metrics) {
+      const label = m.source === "total" ? "今日" : SOURCE_META[m.source].label;
+      if (m.remaining === null) lines.push(m.stale ? `${label} 已重置，等下一次读数` : `${label} ${m.value}`);
+      else lines.push(`${label} ${m.stale ? "上次读到剩余" : "剩余"} ${m.value}%`);
+    }
     const running = payload.claude?.session_name && payload.claude.session_name !== "-"
       ? `当前会话 ${payload.claude.session_name} · ${formatTokens(payload.claude.session_total || 0, zh)}`
       : null;
@@ -360,6 +485,20 @@ function boot(): void {
       acc.costCny += Number(r.cost_cny) || 0;
     }
     return acc;
+  }
+
+  /**
+   * 分享卡页脚那句「更新 HH:mm:ss」（对应 store.lastUpdated 经 formatUpdatedLine 处理）。
+   * 失败/垫进来的缓存没有本轮时刻，就返回 null——分享卡上不写一句假时间。
+   */
+  function updatedStamp(): string | null {
+    const payload = state.payload;
+    if (!payload || payload._ok === false) return null;
+    const at = Number(payload._at);
+    if (!Number.isFinite(at) || at <= 0) return null;
+    const d = new Date(at);
+    const pad = (v: number) => String(v).padStart(2, "0");
+    return `更新 ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
   function enabledToolIds(): string[] {
@@ -429,30 +568,107 @@ function boot(): void {
     compact: "数字", artistic: "星轨", palm: "椰影",
   };
 
-  function setSettings(patch: Partial<Settings>): void {
+  /** 面板能写的设置键；Provider 的 {provider}_quota_enabled、qoder_ide_enabled、设备与同步键都不在这里 */
+  const PANEL_SETTING_KEYS: (keyof Settings)[] = [
+    "disabled_tools", "menu_style", "menu_density", "menu_quota_enabled", "panel_tab",
+    "autostart", "keep_awake_low_battery", "sit_reminder_enabled", "sit_reminder_minutes",
+    "grok_live_quota_enabled", "grok_bot_quota_enabled", "qwenwork_quota_enabled",
+    "panel_font_size", "locale", "share_basic_activity",
+  ];
+
+  /** 只挑出白名单里的键：渲染进程拿到一次注入也改不动联网开关之外的那批配置 */
+  function allowedPatch(raw: Record<string, any>): Partial<Settings> {
+    const out: Record<string, any> = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const key of PANEL_SETTING_KEYS) {
+        if (raw[key] !== undefined) out[key] = raw[key];
+      }
+    }
+    return out as Partial<Settings>;
+  }
+
+  function setSettings(patch: Partial<Settings>, remirror = false): void {
+    const before = settings;
     settings = { ...settings, ...patch };
+    // 卡片显隐、Sub2API 的 Base URL 一动，config.json 里那 8 个开关就得跟着重算
+    //（对应 PV:3128-3158 每个 .onChange 里的 setProviderQuotaEnabled / setQoderIdeEnabled）；
+    // 存/清凭据这两条路是调用方自己点名要重算的（remirror），因为设置项本身没变。
+    if (remirror || patch.disabled_tools !== undefined || patch.sub2api_base_url !== undefined) {
+      settings = { ...settings, ...quotaMirror(providerCredentialStatus(), settings) };
+    }
     saveSettings(settings);
     // 面板里的开关和托盘菜单走同一条路：存了就要生效，不能只落盘
-    if (patch.autostart !== undefined) app.setLoginItemSettings({ openAtLogin: settings.autostart });
+    if (patch.autostart !== undefined) setLoginItem(settings.autostart);
+    // 对应 PV:3471 的 .onChange(of: activityStatisticsEnabled) { ActivityReporter.preferencesChanged() }：
+    // 关掉时掐断在跑的那一发；重新打开要等下次启动才发（一个进程只试一次）
+    if (patch.share_basic_activity !== undefined) activity.preferencesChanged(settings.share_basic_activity);
     // 对应 sitReminder.updateRunning()：改「启用」或改「间隔」都重新起算连续用机时长
     if (patch.sit_reminder_enabled !== undefined || patch.sit_reminder_minutes !== undefined) sitWorkStart = 0;
-    // 对应 PV:3353-3363 每个额度开关的 .onChange { store.refresh() }：这三个键决定这一轮
-    // 扫不扫网，改完立刻重扫才会马上见到新读数；只落盘的话要等下一轮定时刷新才对得上开关。
-    // 设置与采集器共用 ~/.tokei/config.json，重扫时读到的就是刚存下去的这份。
-    if (patch.grok_live_quota_enabled !== undefined || patch.qwenwork_quota_enabled !== undefined
-      || patch.grok_bot_quota_enabled !== undefined) void refresh();
+    // 对应 PV:3353-3363 每个额度开关的 .onChange { store.refresh() }：这些键决定这一轮
+    // 扫不扫网、扫不扫 Qoder 的本机库，改完立刻重扫才会马上见到新读数；只落盘的话要等
+    // 下一轮定时刷新才对得上开关。设置与采集器共用 ~/.tokei/config.json，重扫时读到的
+    // 就是刚存下去的这份。
+    if (RESCAN_KEYS.some((key) => before[key] !== settings[key])) void refresh();
     updateTray();
     applyEnabledTools();
+  }
+
+  /** 动过这些键就得重扫：卡片显隐镜像出来的 8 个开关 + 隐私段那三个联网开关 */
+  const RESCAN_KEYS: (keyof Settings)[] = [
+    "antigravity_quota_enabled", "devin_quota_enabled", "cursor_quota_enabled", "zed_quota_enabled",
+    "sub2api_quota_enabled", "zai_quota_enabled", "minimax_quota_enabled", "qoder_ide_enabled",
+    "grok_live_quota_enabled", "qwenwork_quota_enabled", "grok_bot_quota_enabled",
+  ];
+
+  /**
+   * 开机自启：写一次再读回来确认，对应 LoginItemManager 那句「状态以系统为准」（LI:166）。
+   * Windows 这边是注册表 Run 键，没有 macOS 的「需要在系统设置中允许」审批态（LI:189-241），
+   * 所以回读对不上就当成失败，把原因交给面板那一行红字（PV:3082-3087）。
+   */
+  function setLoginItem(enabled: boolean): void {
+    state.loginError = "";
+    try {
+      app.setLoginItemSettings({ openAtLogin: enabled });
+      if (app.getLoginItemSettings().openAtLogin !== enabled) {
+        state.loginError = enabled
+          ? "开机自启没能生效，可能被组策略或安全软件拦下"
+          : "开机自启没能取消，请手动检查登录时的启动项";
+      }
+    } catch (e: any) {
+      state.loginError = `登录项设置失败：${e?.message ?? e}`;
+    }
+    pushLoginItem();
+  }
+
+  function loginItemSnapshot(): { enabled: boolean; error: string } {
+    let enabled = settings.autostart;
+    try {
+      enabled = app.getLoginItemSettings().openAtLogin;
+    } catch { /* 读不到就退回设置里那一份 */ }
+    return { enabled, error: state.loginError };
+  }
+
+  function pushLoginItem(): void {
+    if (state.panel && !state.panel.isDestroyed()) {
+      state.panel.webContents.send("login-item", loginItemSnapshot());
+    }
   }
 
   function showPanel(): void {
     if (!state.panel || state.panel.isDestroyed()) createPanel();
     const panel = state.panel;
     if (!panel) return;
+    // 屏幕可能在两次打开之间换过（拔掉外接屏、改缩放）：先按当前的屏夹一遍高度再摆
+    clampPanelToScreen();
     positionPanel();
     panel.show();
     panel.focus();
     state.visible = true;
+    // 对应 main.swift:587 那句 store.refresh(prewarmQuotaDetail: true)：开面板先补一轮，
+    // 扫完顺手把额度详情焐上，别让曲线页对着上次缓存；登录项是系统态，也在这时回读一次。
+    state.quotaPrewarmPending = true;
+    pushLoginItem();
+    void refresh();
   }
 
   function createPanel(): void {
@@ -463,8 +679,10 @@ function boot(): void {
     const build = Number(os.release().split(".")[2] || "0");
     const backdrop = process.platform === "win32" && build >= 22621;
     state.panel = new BrowserWindow({
-      width: 420,
-      height: 640,
+      // 对应 PanelPlacement.provisionalSize：面板真正打开前一定会按内容重量一次，
+      // 这只是个不至于太离谱的起点（渲染进程 boot 末尾就会发来真实尺寸）。
+      width: PANEL_PROVISIONAL.width,
+      height: PANEL_PROVISIONAL.height,
       show: false,
       frame: false,
       resizable: false,
@@ -495,15 +713,35 @@ function boot(): void {
     });
     panel.webContents.on("did-finish-load", () => {
       if (state.payload) panel.webContents.send("usage", state.payload);
+      panel.webContents.send("update", updater.state);
     });
+  }
+
+  /** 托盘所在的那块屏：没有托盘坐标就按主屏（对应 anchorVisibleFrame ?? fallbackVisibleFrame） */
+  function panelDisplay() {
+    const bounds = state.tray?.getBounds?.();
+    const anchor = bounds ? { x: bounds.x + Math.round(bounds.width / 2), y: bounds.y } : null;
+    return anchor ? screen.getDisplayNearestPoint(anchor) : screen.getPrimaryDisplay();
+  }
+
+  /** 面板当前尺寸按这块屏的上限夹一遍（对应 PanelPlacement.maximumHeight） */
+  function clampPanelToScreen(): void {
+    const panel = state.panel;
+    if (!panel || panel.isDestroyed()) return;
+    const [width, height] = panel.getSize();
+    const fit = fitPanelSize({ width, height }, panelDisplay().workArea.height);
+    if (fit.width === width && fit.height === height) return;
+    // resizable:false 在 Windows 上会把窗口的最小/最大尺寸钉死在当前值，直接 setSize 会被夹回去；
+    // 改尺寸的瞬间放开、改完再锁回，用户那边依旧拖不动边框。
+    panel.setResizable(true);
+    panel.setSize(fit.width, fit.height);
+    panel.setResizable(false);
   }
 
   /** 对应 PanelPlacement.swift：贴着托盘所在的显示器工作区右上角弹出 */
   function positionPanel(): void {
     if (!state.panel) return;
-    const bounds = state.tray?.getBounds?.();
-    const anchor = bounds ? { x: bounds.x + Math.round(bounds.width / 2), y: bounds.y } : null;
-    const display = anchor ? screen.getDisplayNearestPoint(anchor) : screen.getPrimaryDisplay();
+    const display = panelDisplay();
     const area = display.workArea;
     const [width, height] = state.panel.getSize();
     const x = Math.round(area.x + area.width - width - 8);
@@ -512,18 +750,26 @@ function boot(): void {
   }
 
   /**
-   * 对应 PanelView 的 pageWidth(for: mode) + layout.pageDidChange：宽页（额度曲线、设置）
-   * 与窄页（用量、项目）尺寸不同，换页时由主进程改尺寸并按新的宽度重新贴右摆放。
+   * 对应 PanelView 的 pageWidth(for: mode) + PanelLayoutContext.pageDidChange：宽页（额度曲线、设置）
+   * 与窄页（用量、项目）宽度不同，高度按内容自然高度给、再夹进屏高 0.88；换页时由主进程改尺寸
+   * 并按新的尺寸重新贴右摆放。
+   *
+   * height 省略（undefined）表示「这一趟只改宽度」：渲染进程换页时先落宽度让布局按新宽度重排，
+   * 下一帧再量高度发第二发；直接用旧宽度下量到的高度会把长页裁短一截。
    */
-  function setPanelWidth(width: number): void {
+  function setPanelSize(width: unknown, height?: unknown): void {
     if (!state.panel || state.panel.isDestroyed()) return;
-    const wanted = Math.max(320, Math.min(900, Math.round(Number(width)) || 420));
-    const [current, height] = state.panel.getSize();
-    if (current === wanted) return;
-    // resizable:false 在 Windows 上会把窗口的最小/最大尺寸钉死在当前值，直接 setSize 会被夹回去；
-    // 改尺寸的瞬间放开、改完再锁回，用户那边依旧拖不动边框。
+    const [currentWidth, currentHeight] = state.panel.getSize();
+    const measured = height === null || height === undefined ? undefined : Number(height);
+    const fit = fitPanelSize(
+      { width: Number(width) || 0, height: Number.isFinite(measured) && (measured as number) > 0 ? (measured as number) : 0 },
+      panelDisplay().workArea.height,
+    );
+    const wantedWidth = fit.width;
+    const wantedHeight = measured !== undefined && Number.isFinite(measured) && measured > 0 ? fit.height : currentHeight;
+    if (wantedWidth === currentWidth && wantedHeight === currentHeight) return;
     state.panel.setResizable(true);
-    state.panel.setSize(wanted, height);
+    state.panel.setSize(wantedWidth, wantedHeight);
     state.panel.setResizable(false);
     positionPanel();
   }
@@ -539,15 +785,24 @@ function boot(): void {
     return buildQuotaHistoryFrame(ranged, quotaHistory.points, span, end);
   }
 
-  ipcMain.handle("get-usage", () => state.payload ?? loadJson<Record<string, any>>(LAST_USAGE_FILE, null as any));
+  // 面板开机时问一次「手上有没有读数」。垫进来的那一份要带上 _primed，
+  // 表头才写「缓存数据 · 后台更新中」而不是「等待刷新」（primeCachedUsage 里那句 L(...)）。
+  ipcMain.handle("get-usage", () => {
+    const payload = state.payload ?? loadCachedUsage(LAST_USAGE_FILE);
+    if (!payload) return payload;
+    return state.primed ? { ...payload, _primed: true } : payload;
+  });
   ipcMain.handle("get-settings", () => settings);
   ipcMain.handle("set-settings", (_e, patch: Record<string, any>) => {
-    setSettings(patch as Partial<Settings>);
+    // 面板只能写 UI 设置这一层：联网开关里只有「隐私段」那三项由用户点，
+    // 卡片显隐与 Sub2API 地址由主进程镜像出其余键；Provider 的 *_quota_enabled、
+    // 设备标识、同步目录这些留给采集器的键不接受面板写入，免得注入进去。
+    setSettings(allowedPatch(patch) as Partial<Settings>);
     return settings;
   });
   ipcMain.handle("refresh-now", async () => { await refresh(); return state.payload; });
   ipcMain.handle("hide-panel", () => { state.panel?.hide(); state.visible = false; });
-  ipcMain.handle("set-panel-width", (_e, width: unknown) => setPanelWidth(Number(width)));
+  ipcMain.handle("set-panel-size", (_e, width: unknown, height: unknown) => setPanelSize(width, height));
   ipcMain.handle("open-external", (_e, url: string) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
   });
@@ -574,6 +829,40 @@ function boot(): void {
   ipcMain.handle("run-diagnostics", async () =>
     `${formatDiagnostics(await runCollectorScript(collectorEntry(), process.execPath), collectorEntry())}
 tray: 最近请求 ${lastTrayRequest || "(还没画过)"} / 出图 ${trayRasterStatus()}`);
+  // 价格表段那两个按钮（PV:3589-3618 + runPriceUpdate PV:4190-4218）：抓价在主进程做，
+  // 渲染进程只拿摘要文本。原版取的是子进程的 stdout —— 失败信息打在 stderr，界面上只显示
+  // 空串（也就是什么都不显示），这里照抄这个口径，只把 code 一起带回去供按钮复位。
+  ipcMain.handle("update-prices", async () => {
+    const result = await runPriceUpdate(RESOURCE_DIR, scanCache);
+    // 原版跑完无条件 store.refresh()：价目表换了，缓存里预存的成本要按新价重算
+    await refresh();
+    return { code: result.code, message: result.code === 0 ? result.message : "" };
+  });
+  // 价格表段第二个按钮「查漏补缺」（PV:3597-3600）：扫本机日志补未知模型的价，全程不联网。
+  // 文本口径照抄视图层那段（PV:4209-4214）：认得出 JSON 就按 count 出「补全 N 个模型」或
+  // 「所有模型已匹配 ✓」，认不出就退回把 stdout 原样去空白后显示；子进程崩了 stdout 是空串，
+  // 界面跟抓价失败一样什么都不显示。
+  ipcMain.handle("update-unknown", async () => {
+    const result = await runPriceUpdateScript(collectorEntry(), process.execPath, "--update-unknown");
+    let count = 0;
+    let message = "";
+    try {
+      const parsed = JSON.parse(result.stdout);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Number.isInteger(parsed.count)) {
+        count = parsed.count;
+        message = count > 0 ? `补全 ${count} 个模型` : "所有模型已匹配 ✓";
+      } else {
+        message = result.stdout.trim();
+      }
+    } catch {
+      message = result.stdout.trim();
+    }
+    // 对应 _remove_scan_cache_files() + _remove_codex_event_cache_dir()（15760-15763，只在有新增时）：
+    // 我们的扫描缓存是内存版，删文件在这里就等于清空它，下一轮从头重扫
+    if (count > 0) for (const key of Object.keys(scanCache)) delete scanCache[key];
+    await refresh();
+    return { code: result.exitCode, message };
+  });
   // 额度曲线：跨度决定画多远的快照，按天消耗始终吃全量历史（同 macOS 的 makeFrame）
   ipcMain.handle("get-quota-history", (_e, spanHours: unknown) => quotaHistoryFrame(spanHours));
   // 额度详情：进「额度」页由渲染进程带 force=true 拉一次（与 loadCurve 同一路），
@@ -591,9 +880,21 @@ tray: 最近请求 ${lastTrayRequest || "(还没画过)"} / 出图 ${trayRasterS
   ipcMain.handle("provider-save", (_e, input: Record<string, any>) => saveProviderSettings(input));
   ipcMain.handle("provider-clear", (_e, provider: unknown) => clearProviderSecret(provider));
   ipcMain.handle("app-version", () => app.getVersion());
+  // 更新器：检查与安装都只在主进程跑，渲染进程只拿状态、只发动作
+  ipcMain.handle("update-state", () => updater.state);
+  ipcMain.handle("update-check", (_e, userInitiated: unknown) => {
+    void updater.checkForUpdate(userInitiated === true);
+    return updater.state;
+  });
+  ipcMain.handle("update-apply", () => {
+    void updater.performUpdate();
+    return updater.state;
+  });
   ipcMain.handle("quit-app", () => { app.quit(); });
   // 防休眠：每个动作都把最新快照还给面板，省一次往返
   ipcMain.handle("keep-awake-status", () => keepAwake.snapshot());
+  // 登录项的真实状态由系统保管，面板每次进设置页先拉一次、之后接推送（对应 LoginItemManager）
+  ipcMain.handle("get-login-item", () => loginItemSnapshot());
   ipcMain.handle("keep-awake-start", (_e, minutes: unknown) => {
     keepAwake.start(Number.isFinite(Number(minutes)) && Number(minutes) > 0 ? Math.round(Number(minutes)) : null);
     return keepAwake.snapshot();
@@ -610,34 +911,32 @@ tray: 最近请求 ${lastTrayRequest || "(还没画过)"} / 出图 ${trayRasterS
   });
   // 久坐提醒的「测试提醒」：对应 PanelView.swift:3578 那颗按钮，立刻弹一条通知验证通路
   ipcMain.handle("sit-test", () => { notifySit(true); return true; });
-  // 对应 macOS footer 的「复制用量图」：原版用 ImageRenderer 画分享卡，Windows 没有等价渲染器，
-  // 这里等价地截面板自己 —— 截到的就是当前这块面板，宽度随页面切换变。
-  ipcMain.handle("copy-panel-image", async () => {
-    const panel = state.panel;
-    if (!panel || panel.isDestroyed()) return false;
-    return writeImage(await panel.webContents.capturePage());
-  });
-  // 单张卡的复制：矩形由渲染进程按卡片在视口里的位置给出（CSS 像素），坐标系与 capturePage 一致
-  ipcMain.handle("copy-card-image", async (_e, raw: unknown) => {
-    const panel = state.panel;
-    if (!panel || panel.isDestroyed() || !raw || typeof raw !== "object") return false;
-    const box = raw as Record<string, unknown>;
-    const width = Math.round(Number(box.width) || 0);
-    const height = Math.round(Number(box.height) || 0);
-    if (width <= 0 || height <= 0) return false;
-    const image = await panel.webContents.capturePage({
-      x: Math.max(0, Math.round(Number(box.x) || 0)),
-      y: Math.max(0, Math.round(Number(box.y) || 0)),
-      width,
-      height,
-    });
-    return writeImage(image);
+  // 对应 footer 的「复制」（copyUsageImage，PV:2642-2658）与卡头的单张复制（PV:2661-2685）：
+  // 原版不是截屏，而是用 ImageRenderer 按 UsageShareImage 的版式单独画一张卡。
+  // 这里同样单独出图；数据由主进程从手上的 payload 组（core/shareCard.ts），不经渲染进程。
+  ipcMain.handle("copy-share-image", async (_e, raw: unknown) => {
+    if (!state.payload) return false;
+    const req = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+    return copyShareImage(buildShareSpec({
+      payload: state.payload,
+      range: typeof req.range === "string" ? req.range : "today",
+      disabled: settings.disabled_tools,
+      kind: req.kind === "tool" ? "tool" : "overview",
+      toolId: typeof req.toolId === "string" ? req.toolId : null,
+      updated: updatedStamp(),
+      fontScale: PANEL_FONT_SCALE[settings.panel_font_size] ?? 1,
+    }));
   });
 
   app.whenReady().then(() => {
     initPricing(RESOURCE_DIR);
     settings = loadSettings();
-    app.setLoginItemSettings({ openAtLogin: settings.autostart });
+    // 对应那四个 syncXxxConfigOnLaunch（PV:3547-3587）：启动时先做一次卡片显隐/凭据的镜像。
+    // 面板的 onChange 在启动那一刻不会触发，原版特意写了这句注释说明「不补这一发
+    // qoder_ide_enabled 就永远没人写」；这里同一批把 8 个键都对齐。
+    settings = { ...settings, ...quotaMirror(providerCredentialStatus(), settings) };
+    saveSettings(settings);
+    setLoginItem(settings.autostart);
     // 防休眠不跨重启恢复（macOS 的 KeepAwake 也从不落盘），所以这里只还原自启
 
     state.tray = new Tray(fallbackIcon());
@@ -645,11 +944,33 @@ tray: 最近请求 ${lastTrayRequest || "(还没画过)"} / 出图 ${trayRasterS
     state.tray.on("double-click", () => showPanel());
     state.tray.on("right-click", () => state.tray?.popUpContextMenu());
 
+    // 对应 store.primeCachedUsage() 排在 store.refresh() 之前（main.swift:350-351）：
+    // 先用上一轮的读数把托盘垫上，再开第一趟扫描。垫完要重画一次，对应那句 applyDisplayMode。
+    primeCachedUsage();
     updateTray();
     applyEnabledTools();
     refresh();
     // 任务栏配色不是事件可订阅的，60s 轮询一次足够（用户切主题后一分钟内跟上）
     void refreshTaskbarTheme().then(() => updateTray());
+
+    // 对应 main.swift:352-353 的 ActivityReporter.reportLaunchIfNeeded(appVersion: Updater.releaseTag)：
+    // 排在启动序列里，一次进程只试一次；关掉开关时连状态文件都不碰。
+    void activity.reportLaunchIfNeeded(app.getVersion(), settings.share_basic_activity);
+
+    // 对应 main.swift:353 与 371：启动查一次，之后每 6 小时一次
+    void updater.checkForUpdate();
+    updateTimer = setInterval(() => { void updater.checkForUpdate(); }, UPDATE_CHECK_INTERVAL);
+
+    // 对应 autoFetchPricing（main.swift:542-560，启动序列的最后一环）：pricing.json 的 mtime
+    // 距今不足 24 小时就一趟都不跑；跑过（不管成没成）都补一轮采集，因为价目表一改，
+    // 缓存里预存的成本要按新价重算，托盘和面板得跟着变。
+    // 原版在 utility 队列上同步 waitUntilExit，这里挂到事件循环上——启动不该被网络拖住。
+    void autoFetchPricing(RESOURCE_DIR, scanCache, {}, (result) => {
+      if (!result) return;
+      // 原版把 stdout/stderr 全丢进 nullDevice，失败连一行日志都不留；这里至少让人查得到
+      if (result.code !== 0) console.error(result.message);
+      refresh();
+    });
 
     // 对应 main.swift 的 2 秒 tick Timer（.common 模式）
     state.timer = setInterval(() => {
@@ -713,8 +1034,7 @@ tray: 最近请求 ${lastTrayRequest || "(还没画过)"} / 出图 ${trayRasterS
       const value = clean(keys[p]);
       if (value && !saveCredential(p, value)) return providerReply(false, "保存失败");
     }
-    setSettings(patch);
-    setSettings(providerQuotaFlags(providerCredentialStatus(), settings));
+    setSettings(patch, true);
     void refresh();
     return providerReply(true, "已保存");
   }
@@ -723,7 +1043,8 @@ tray: 最近请求 ${lastTrayRequest || "(还没画过)"} / 出图 ${trayRasterS
   function clearProviderSecret(provider: unknown) {
     if (!isProviderSecret(provider)) return providerReply(false, "清除失败");
     if (!clearCredential(provider)) return providerReply(false, "清除失败");
-    setSettings(providerQuotaFlags(providerCredentialStatus(), settings));
+    // 凭据变了但设置项没变，让 setSettings 强制重算一遍镜像
+    setSettings({}, true);
     void refresh();
     return providerReply(true, "已清除");
   }
@@ -737,21 +1058,11 @@ tray: 最近请求 ${lastTrayRequest || "(还没画过)"} / 出图 ${trayRasterS
   });
   app.on("quit", () => {
     if (state.timer) clearInterval(state.timer);
+    if (updateTimer) clearInterval(updateTimer);
+    updater.dispose();
     keepAwake.dispose();
     closeRasterWindow();
   });
-}
-
-/**
- * Electron 44 的剪贴板换成了 Web 标准那套（`clipboard.write(ClipboardItem[])`），
- * 老写法 `writeImage` 已经不存在：PNG 字节包成 Blob 再写。
- */
-async function writeImage(image: Electron.NativeImage): Promise<boolean> {
-  if (image.isEmpty()) return false;
-  await clipboard.write([new ClipboardItem({
-    "image/png": new Blob([image.toPNG()], { type: "image/png" }),
-  })]);
-  return true;
 }
 
 /** Fmt.human：中文按「亿」进位，其他语言用 B；K 档不保留小数 */

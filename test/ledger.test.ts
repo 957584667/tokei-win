@@ -6,7 +6,7 @@
  *   - 天级高水位对账：日志被删不缩水、坏时间戳不入账、版本更高的旧账本赢
  *   - 来源级合并：缺席来源保留、v1 无 provenance 只保余额、Codex 权威来源可直接替换
  *   - flush 落盘、_sources 45 天收拢、损坏后从同步仓快照自愈
- *   - 无公开价模型的成本清洗
+ *   - 无公开价模型的成本重算（清零 / 按 token × 现价补回）
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import * as crypto from "crypto";
@@ -17,8 +17,9 @@ import {
   codexLegacyDay, ledgerAddRecordSource, ledgerDayTotal, ledgerFileSources, ledgerFlush,
   ledgerMemo, ledgerMergeSources, ledgerRecordVersion, ledgerReconcile, ledgerTokenSum, ledgerTouch,
   ledgerValues, loadLedger, prepareQoderCliLedger, prepareUnpricedCostLedger,
-  pruneLedgerSources, useLedgerFile,
+  pruneLedgerSources, repriceUnpricedCosts, useLedgerFile,
 } from "../src/core/ledger";
+import { rawPrice } from "../src/core/price";
 
 let ROOT: string;
 let LEDGER: string;
@@ -301,30 +302,62 @@ describe("保留期与自愈", () => {
   });
 });
 
-describe("成本清洗与逐来源记账", () => {
-  it("无公开价模型的兜底成本被清零，当天合计同步扣掉", () => {
+describe("成本重算与逐来源记账", () => {
+  it("无公开价模型清零、有公开价按 token × 现价重算，当天合计按差额调整", () => {
+    const priced = "anthropic/claude-sonnet-4.6";
+    const p = rawPrice(priced);
+    const pricedCost = (1e6 * p.in + 1e6 * p.out) / 1e6;
     fs.writeFileSync(LEDGER, JSON.stringify({
       v: 1, tools: { workbuddy: {
-        [DAY]: { cost: 4.0, models: { "totally-unknown-model": { cost: 3.5 }, "anthropic/claude-sonnet-4.6": { cost: 0.5 } } },
+        [DAY]: { cost: 4.0, models: {
+          "totally-unknown-model": { in: 1e6, out: 1e6, cr: 1e6, cw: 1e6, cost: 3.5 },
+          [priced]: { in: 1e6, out: 1e6, cr: 0, cw: 0, cost: 0.5 },
+        } },
         [OTHER]: {
           cost: 1.0,
-          models: { "totally-unknown-model": { cost: 1.0 } },
-          _sources: { s: { cost: 1.0, models: { "totally-unknown-model": { cost: 1.0 } } } },
+          models: { "totally-unknown-model": { in: 1e6, out: 0, cr: 0, cw: 0, cost: 1.0 } },
+          _sources: { s: { cost: 1.0, models: { "totally-unknown-model": { in: 1e6, out: 0, cr: 0, cw: 0, cost: 1.0 } } } },
         },
       } },
     }));
     useLedgerFile(LEDGER, CONFIG);
     prepareUnpricedCostLedger("workbuddy");
     const ledger = loadLedger();
-    expect(ledger.tools.workbuddy[DAY].cost).toBe(0.5);
     expect(ledger.tools.workbuddy[DAY].models["totally-unknown-model"].cost).toBe(0);
+    expect(ledger.tools.workbuddy[DAY].models[priced].cost).toBeCloseTo(pricedCost, 10);
+    expect(ledger.tools.workbuddy[DAY].cost).toBeCloseTo(pricedCost, 10);
     expect(ledger.tools.workbuddy[OTHER].cost).toBe(0);
     expect(ledger.tools.workbuddy[OTHER]._sources.s.cost).toBe(0);
     expect(ledger.tools.workbuddy[OTHER]._sources.s.models["totally-unknown-model"].cost).toBe(0);
-    expect(ledger.workbuddy_unpriced_schema).toBe(1);
-    // 清洗只做一次：再调不重复扣
+    expect(ledger.workbuddy_unpriced_schema).toBe(3);
+    // 迁移只做一次：再调不重复动
     prepareUnpricedCostLedger("workbuddy");
-    expect(loadLedger().tools.workbuddy[DAY].cost).toBe(0.5);
+    expect(loadLedger().tools.workbuddy[DAY].cost).toBeCloseTo(pricedCost, 10);
+  });
+
+  it("Pi 保住日志自带的真实成本，Qwen Code 把 reason 计入输出", () => {
+    const priced = "anthropic/claude-sonnet-4.6";
+    const qwen = "qwen/qwen3.8-max";
+    const piDay: any = {
+      cost: 9.9,
+      models: {
+        [priced]: { in: 1e6, out: 0, cr: 0, cw: 0, cost: 9.9 },
+        "totally-unknown-model": { in: 1e6, out: 0, cr: 0, cw: 0, cost: 0 },
+      },
+    };
+    repriceUnpricedCosts(piDay, "pi");
+    expect(piDay.models[priced].cost).toBe(9.9); // 只补原来是 0 的行
+    expect(piDay.cost).toBe(9.9);
+
+    const qp = rawPrice(qwen);
+    const qwenDay: any = { cost: 0, models: { [qwen]: { in: 0, out: 0, reason: 1e6, cr: 0, cw: 0, cost: 0 } } };
+    repriceUnpricedCosts(qwenDay, "qwencode");
+    expect(qwenDay.models[qwen].cost).toBeCloseTo(qp.out, 10);
+    expect(qwenDay.cost).toBeCloseTo(qp.out, 10);
+    // 无公开价：清零后当天合计钳到 0，不会出现负数
+    const zeroDay: any = { cost: 0.2, models: { "totally-unknown-model": { in: 1e6, out: 1e6, cr: 0, cw: 0, cost: 5 } } };
+    repriceUnpricedCosts(zeroDay, "workbuddy");
+    expect(zeroDay.cost).toBe(0);
   });
 
   it("逐文件来源：逻辑 ID 扛得住文件移动，day_hours 覆盖小时分布", () => {

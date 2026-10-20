@@ -32,6 +32,8 @@
             <span class="brand-sub">知度 · AI 用量</span>
           </span>
         </button>
+        <!-- 对应 PV:324 的 updatePill：只在可升级/下载中/安装中/失败四态出现，其余为空 -->
+        <button type="button" class="update-pill" id="btn-update" hidden aria-label="更新"></button>
         <span class="filler"></span>
         <!-- 对应 header 里的 store.lastUpdated：9.5 等宽、三级文字色 -->
         <span id="last-updated" class="stamp"></span>
@@ -153,9 +155,38 @@
               <div class="diag-out" id="diag-out" hidden></div>
             </div>
           </section>
+
+          <!-- 价格表（PV:3589-3618）：两个按钮并排 + 转圈 + 结果文本（点一下或 30 秒后消失） -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M10.1 5.6c-.3-.8-1.2-1.2-2.1-1.2-1.1 0-1.9.6-1.9 1.4 0 2 3.9 1.4 3.9 3.3 0 .9-.9 1.5-2 1.5-1 0-1.8-.5-2.1-1.3M8 3v1.4M8 11.6V13"/></svg></span>
+              <span class="set-sec-title">价格表</span>
+            </div>
+            <div class="set-sec-body">
+              <div class="diag-bar">
+                <button type="button" class="set-act" id="btn-price-sync">全量更新</button>
+                <button type="button" class="set-act" id="btn-price-unknown">查漏补缺</button>
+                <span class="diag-spin" id="price-spin" hidden></span>
+              </div>
+              <p class="set-note price-result" id="price-result" hidden></p>
+            </div>
+          </section>
         </div>
 
         <div class="set-col">
+          <!-- 界面（PV:2897-2928）：原版本段是「语言 + 字体大小」两项。Windows 侧只做了中文
+               一套文案（没有 fr/ja/ko 那批词条），摆个切了没反应的钮比缺一项更糟，所以只落字体大小 -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.4 12.6 4.2 3.4l2.8 9.2M2.4 9.4h3.6"/><path d="M10.2 12.6h4.2M11.6 6.6h2.8"/></svg></span>
+              <span class="set-sec-title">界面</span>
+            </div>
+            <div class="set-sec-body">
+              <div class="set-stacked"><span class="set-stacked-label">字体大小</span><div id="font-size-choice" class="segmented is-mini"></div></div>
+              <p class="set-note">「大」是 1.12 倍字号，和 macOS 那档一致：只放大文字，图标与盒子尺寸不变，卡片会跟着长高一点。</p>
+            </div>
+          </section>
+
           <!-- 菜单栏（PV:2804-2869）：样式 / 信息 / 额度来源 + 提示语 -->
           <section class="set-sec">
             <div class="set-sec-head">
@@ -171,6 +202,24 @@
               </div>
               <p class="set-hint2" id="quota-choice-hint"></p>
               <p class="set-note">只影响任务栏剩余额度，与「显示卡片」无关。每项都是一个具体窗口：5h 是滚动的 5 小时窗口，周是本周配额。双额度按上面的顺序取前两项，单额度只显示剩得最少的那项。「符号」「圆点」两种样式会用沙漏标 5h、横块标周；其余样式只有数字，鼠标放到任务栏上能看到窗口全名。勾了但本机没有这个窗口、或者读数已过期，任务栏会跳过它。</p>
+            </div>
+          </section>
+
+          <!-- 版本与更新（PV:2998-3060）：左版本信息，右按状态给「检查 / 升级 / 下载中 / 安装中 / 重试」 -->
+          <section class="set-sec">
+            <div class="set-sec-head">
+              <span class="set-sec-ico"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.1 7.6a5.2 5.2 0 0 0-9-3.2M2.9 8.4a5.2 5.2 0 0 0 9 3.2"/><path d="M13.5 3.4v3.6H9.9M2.5 12.6V9h3.6"/></svg></span>
+              <span class="set-sec-title">版本与更新</span>
+            </div>
+            <div class="set-sec-body">
+              <div class="upd-row">
+                <div class="upd-info">
+                  <span class="upd-version" id="update-version">当前版本 —</span>
+                  <span class="upd-note">启动时自动检查，也可在这里手动检查</span>
+                </div>
+                <span class="filler"></span>
+                <span class="upd-state" id="update-state"></span>
+              </div>
             </div>
           </section>
 

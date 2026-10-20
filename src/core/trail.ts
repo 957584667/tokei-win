@@ -30,6 +30,8 @@ export interface TrailProject {
   cost_cny?: number;
   top_model: string;
   tools: string[];
+  /** 该项目目录下正在监听的本地端口（python projects() 的 entry["ports"]） */
+  ports?: number[];
 }
 
 interface Contribution {
@@ -338,4 +340,17 @@ export function projectTrail(cache: Record<string, any>): TrailProject[] {
   }
   out.sort((a, b) => (a.last_active < b.last_active ? 1 : a.last_active > b.last_active ? -1 : 0));
   return out;
+}
+
+/**
+ * 对应 python projects() 里那句 `if path in port_map: entry["ports"] = sorted(...)`。
+ * 端口探测要起子进程（Windows 上还有一次 PowerShell），所以留在调用方按需跑，
+ * 核心层只负责把结果按路径贴回去。
+ */
+export function attachPorts(list: TrailProject[], ports: Record<string, number[]>): TrailProject[] {
+  for (const entry of list) {
+    const found = ports[entry.path];
+    if (found && found.length) entry.ports = [...found].sort((a, b) => a - b);
+  }
+  return list;
 }

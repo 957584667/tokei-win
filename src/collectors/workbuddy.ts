@@ -80,6 +80,11 @@ const TOOL_DEFAULTS: Record<WorkBuddyTool, { env: string; dir: string }> = {
   workbuddy_ai: { env: "TOKEI_WORKBUDDY_AI_DIR", dir: path.join(HOME, ".workbuddy-ai", "projects") },
 };
 
+/** 对应 WORKBUDDY_DIR 与 WORKBUDDY_AI_DIR：查漏补缺扫模型名时要的那两个根。 */
+export function workbuddyRoots(): string[] {
+  return [...toolRoots("workbuddy"), ...toolRoots("workbuddy_ai")];
+}
+
 function toolRoots(tool: WorkBuddyTool): string[] {
   const def = TOOL_DEFAULTS[tool];
   // env 覆盖时替换默认根（测试注入隔离），未设置才回落到 ~/.<tool>/projects

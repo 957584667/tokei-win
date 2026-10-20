@@ -81,6 +81,23 @@ function withGrokQuota(p, ended) {
 const PAYLOAD_GROK = withGrokQuota(payload, false);
 const PAYLOAD_GROK_ENDED = withGrokQuota(payload, true);
 
+// Grok 的真实用量分支要靠本机推理日志，这台机器一条没有，平均 TTFT / 平均响应（带 help 的两格）
+// 永远不会出现。按 GrokRange 的形状补一份，只用来量那两格与 help 角标的几何。
+function withGrokUsage(p) {
+  const c = JSON.parse(JSON.stringify(p));
+  const r = c.grok.ranges.today;
+  Object.assign(r, {
+    tokens: 3_820_000, hit: 71.4, in: 980_000, out: 240_000, cr: 2_560_000, reason: 40_000,
+    cost: 6.28, usage_available: true, usage_calls: 412, usage_sessions: 33, sessions: 33,
+    turns: 118, tools: 96, duration: 5_312, ctx: 63.4, errors: 2, cancellations: 1,
+    ttft: 1_842, response: 9_265,
+    models: [{ model_id: "grok-4", name: "grok-4", in: 980000, out: 240000, cr: 2560000, cw: 0,
+      reason: 40000, cost: 6.28, cost_cny: 0, credits: 0, pin: 2.0, pout: 5.0, pcr: 0.5, pref: "Grok 4" }],
+  });
+  return c;
+}
+const PAYLOAD_GROK_USAGE = withGrokUsage(withGrokQuota(payload, false));
+
 // 千问办公额度只有桌面端本机接口才有（Windows 上 available 恒为 false），
 // 共享资源包 / 明细 / 到期行都得合成。形状照 Model.swift:822-828 与 collector 的 qwenwork 节点。
 function withQwenQuota(p, stale) {
@@ -135,14 +152,17 @@ const EXTRA = [
   { path: LONG, name: "erp.api", last_active: today(), sessions: 1234567,
     tokens: 999999999, cost: 12345.67, cost_cny: 88888.88,
     top_model: "MiMo-V2.5-Pro-Longest-Model-DisplayName (DeepSeek Harness)",
-    tools: ["claude", "codex", "workbuddy", "deepseek_harness", "musecode", "kimicode", "grok"] },
+    tools: ["claude", "codex", "workbuddy", "deepseek_harness", "musecode", "kimicode", "grok"],
+    ports: [3000, 5173, 8080] },
   { path: "D:\\work\\ai_code\\qoder 中文项目名-含空格", name: "qoder 中文项目名-含空格", last_active: today(),
-    sessions: 2, tokens: 100, cost: 0, top_model: "", tools: ["claude"] },
-  { path: "C:\\Users\\A\\notes", name: "notes", last_active: farDay(30), sessions: 1, tokens: 10,
+    sessions: 2, tokens: 100, cost: 0, top_model: "", tools: ["claude"], ports: [9229] },
+  { path: "C:\\Users\\me\\notes", name: "notes", last_active: farDay(30), sessions: 1, tokens: 10,
     cost: 0.01, top_model: "GPT-5.1 Codex (Codex)", tools: ["codex"] },
   { path: "D:\\work\\ai_code\\x", name: "an-absurdly-long-project-directory-name-for-overflow-testing",
     last_active: today(), sessions: 99999, tokens: 1, cost: 0.02, cost_cny: 0.13,
-    top_model: "claude-opus-4-1-20251114 (Claude)", tools: ["claude", "codex", "pi", "prime_agent", "kimicode", "musecode", "cmdcode"] },
+    top_model: "claude-opus-4-1-20251114 (Claude)", tools: ["claude", "codex", "pi", "prime_agent", "kimicode", "musecode", "cmdcode"],
+    // 六个端口：超过四个要能横向滚动，且不能被行宽裁掉第一个
+    ports: [3000, 3001, 3002, 3003, 3004, 3005] },
 ];
 const TRAIL = [...EXTRA, ...trail];
 
@@ -160,8 +180,14 @@ const SETTINGS = {
   autostart: false, keep_awake_low_battery: true, sit_reminder_enabled: false, sit_reminder_minutes: 45,
   panel_tab: "usage", device_id: "probe", sync_dir: "",
   grok_live_quota_enabled: false, qwenwork_quota_enabled: false, locale: "auto",
+  // 活跃统计默认开（settings.ts 的 defaultSettings 同一个默认值）
+  share_basic_activity: true,
   sub2api_base_url: "https://sub2api.example.com/v1", zai_region: "bigmodel-cn",
   sub2api_quota_enabled: false, zai_quota_enabled: true, minimax_quota_enabled: false,
+  // 主进程那份「卡片显隐镜像」（settings.ts 的 QUOTA_KEY_DEFAULTS 同一批键）
+  antigravity_quota_enabled: true, devin_quota_enabled: true,
+  cursor_quota_enabled: false, zed_quota_enabled: false, qoder_ide_enabled: true,
+  panel_font_size: "small",
 };
 /** 设置页的三种极端档位：久坐展开（多一条间隔行）、额度来源全开（摘要走「放不下」）、全关 */
 const SETTINGS_SIT = { ...SETTINGS, sit_reminder_enabled: true, sit_reminder_minutes: 60 };
@@ -171,6 +197,12 @@ const SETTINGS_QUOTA_ALL = {
     "codexWeek", "kimi5h", "kimiSubscription", "grok"].map((k) => [k, true])),
 };
 const SETTINGS_QUOTA_NONE = { ...SETTINGS, menu_quota_enabled: { claude5h: false, codexWeek: false } };
+/** 「大」字号那一档：--ui-scale 1.12，整页文字放大，量的是设置页会不会溢出 */
+const SETTINGS_FONT_LARGE = { ...SETTINGS, panel_font_size: "large" };
+/** 活跃统计关掉的那一档：量开关本身的两种状态，说明文字不随勾选变化 */
+const SETTINGS_NO_ACTIVITY = { ...SETTINGS, share_basic_activity: false };
+/** 主进程注册失败回执里那句（index.ts setLoginItem），用来量红字那一行的几何 */
+const LOGIN_ITEM_ERROR = "开机自启没能生效，可能被组策略或安全软件拦下";
 
 /**
  * 窄页（322 单列）的入口是「可见卡片 ≤2」：对应 PanelView 的 useWide 判定。
@@ -184,6 +216,8 @@ const ALL_BUT_TWO = [
   "cmdcode", "devin", "minimax", "antigravity", "cursor", "zed", "sub2api", "zai",
 ];
 const LEAN = { ...SETTINGS, disabled_tools: ALL_BUT_TWO };
+/** 字号「大」+ 322 单列是最紧的一档：1.12 倍文字压在窄卡上 */
+const LEAN_FONT_LARGE = { ...LEAN, panel_font_size: "large" };
 /**
  * 窄档（322 单列）的真实入口是「可见卡片 ≤2」，所以合成页要按 payload 里的工具名逐个关掉，
  * 只留被测的那一张；只关一部分会得到 322 双列那种真机上不存在的版式。
@@ -452,7 +486,7 @@ const DASH_FULL = dashSet(true);
 /** 诊断报告的桩：行首必须是 exit: / json: / errors: 才进摘要；
  *  总行数故意超过 16，用来量展开全文的 lineLimit(16) 封顶。 */
 const DIAG_REPORT = [
-  "script: D:\\work\\ai_code\\tokei-win\\dist\\cli.js",
+  "script: D:\\work\\ai_code\\tokei-main\\tokei-win\\dist\\cli.js",
   "exists: true size: 148392B",
   "exit: 0 timeout: no elapsed: 3.42s",
   "stdout: 1048576B stderr: 0B",
@@ -483,6 +517,23 @@ Object.defineProperty(window, "innerWidth", { get: () => ${vw} });
 Object.defineProperty(window, "innerHeight", { get: () => 640 });
 window.__usagePush = [];
 window.__copyCalls = [];
+// 更新器：哈希 update=available|downloading|installing|failed|upToDate|checking 选一档喂给 boot()
+const __updStates = {
+  idle: { kind: "idle" },
+  checking: { kind: "checking" },
+  upToDate: { kind: "upToDate" },
+  available: { kind: "available", tag: "v1.2.3" },
+  downloading: { kind: "downloading", progress: 0.42 },
+  installing: { kind: "installing" },
+  failed: { kind: "failed", message: "网络不可用" },
+};
+const __updKey = (/(?:#|&)update=([A-Za-z]+)/.exec(location.hash) || [])[1];
+window.__updateState = __updStates[__updKey] || { kind: "idle" };
+window.__updateCalls = 0;
+window.__updateApply = 0;
+window.__updatePush = [];
+// 面板尺寸：每发 [宽, 高]，高为 null 表示「只改宽度」（换页先落宽度、下一帧再发高度）
+window.__panelSizes = [];
 // 防休眠：主进程那份快照用桩复现。ka=on 无限期 / ka=15 定时 15 分钟；
 // kamode=1 = 允许关屏；kaguard=0 = 低电量保护已关。
 window.__ka = {
@@ -509,22 +560,35 @@ window.addEventListener("unhandledrejection", (e) => {
   p.textContent = "BOOT-REJECT " + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason);
   document.body.appendChild(p);
 });
+// 开机垫的那一档（primed=1）要在这里就定下来：app.js 的 boot() 早于下面那段
+// 参数处理跑完，晚设就量不到「缓存数据 · 后台更新中」。
+window.__primed = location.hash.slice(1).split("&").includes("primed=1");
+// ok0=1：扫描失败但手上还有旧读数那一档（表头「缓存数据 · 等待刷新」），回执推 _ok=false。
+window.__ok0 = location.hash.slice(1).split("&").includes("ok0=1");
+const __pay = ${JSON.stringify(pay)};
 window.tokei = {
-  getSettings: async () => (${JSON.stringify(settings)}),
-  setSettings: async (p) => Object.assign({}, ${JSON.stringify(settings)}, p),
-  getUsage: async () => (${JSON.stringify(pay)}),
+  getSettings: async () => window.__settings,
+  // 桩这边要累加，不能每次都拿写死的初值当底：一次 act() 里连点四个控件是并发的 async save，
+  // 用固定底会让后写入的 patch 把前一个（比如字号「大」）盖回去，量出来的是桩的假象。
+  setSettings: async (p) => { window.__settings = Object.assign({}, window.__settings, p); return window.__settings; },
+  getUsage: async () => (window.__primed ? Object.assign({}, __pay, { _primed: true }) : __pay),
   // onUsage 走真链路：refreshNow 之后按主进程那一轮的样子推一份带 _ok/_at 的 payload，
   // 这样表头的「更新 HH:mm:ss」与整页失败态都能量到，而不是只测缓存分支。
+  // primed=1 那一档模拟「面板在第一趟扫描回来之前打开」：回执不推，手上这份就一直算垫进来的。
   onUsage: (h) => { window.__usagePush.push(h); },
   refreshNow: async () => {
-    const p = Object.assign({}, ${JSON.stringify(pay)}, { _ok: true, _at: Date.now() });
-    window.__usagePush.forEach((h) => h(p));
+    const p = Object.assign({}, __pay, { _ok: !window.__ok0, _at: Date.now() });
+    if (!window.__primed) window.__usagePush.forEach((h) => h(p));
     return p;
   },
   appVersion: async () => "0.1.0",
+  updateState: async () => window.__updateState,
+  checkUpdate: async () => { window.__updateCalls += 1; return window.__updateState; },
+  applyUpdate: async () => { window.__updateApply += 1; return window.__updateState; },
+  onUpdate: (h) => { window.__updatePush.push(h); return () => {}; },
   hidePanel: () => {}, openExternal: () => {},
   // 宽窄页切换在真机上是主进程改窗口，测量台里窗口尺寸已经按这一页的档位钉死，桩只需吞掉调用
-  setPanelWidth: async () => true,
+  setPanelSize: async (w, h) => { window.__panelSizes.push([w, h ?? null]); return true; },
   getQuotaHistory: async (span) => window.__curveFrames[span] || window.__curveFrames[24],
   // 周额度详情：契约是 Promise<QuotaDetailPayload | null>（preload.ts:16），force 只影响主进程缓存，
   // 桩这边直接回快照；detail=none 复现「一次都没构建成功」的 null，量占位与缺失提示那一档。
@@ -533,8 +597,8 @@ window.tokei = {
   // 这里按区间直接回同一份 buildDashboard() 产物；period 缺档回 null 复现「一次都没构建成功」。
   getDashboard: async (period) => window.__dash[period] || null,
   credentialStatus: async () => ({ sub2api: false, zai: true, minimax: false }),
-  saveProviderSettings: async (i) => ({ ok: true, result: "已保存", stored: { sub2api: !!i.keys.sub2api, zai: !!i.keys.zai, minimax: !!i.keys.minimax }, settings: (${JSON.stringify(settings)}) }),
-  clearProviderSecret: async () => ({ ok: true, result: "已清除", stored: { sub2api: false, zai: false, minimax: false }, settings: (${JSON.stringify(settings)}) }),
+  saveProviderSettings: async (i) => ({ ok: true, result: "已保存", stored: { sub2api: !!i.keys.sub2api, zai: !!i.keys.zai, minimax: !!i.keys.minimax }, settings: window.__settings }),
+  clearProviderSecret: async () => ({ ok: true, result: "已清除", stored: { sub2api: false, zai: false, minimax: false }, settings: window.__settings }),
   quitApp: async () => true,
   // 防休眠：主进程那份状态用桩复现。ka=on 无限期开启 / ka=15 定时 15 分钟，
   // kamode=1 表示允许关屏，kaguard=0 表示低电量保护已关。
@@ -545,8 +609,21 @@ window.tokei = {
   keepAwakeLowBattery: async (v) => setKa({ lowBatteryGuard: !!v }),
   sitTest: async () => { window.__sitTests = (window.__sitTests ?? 0) + 1; return true; },
   onKeepAwake: () => () => {},
-  copyPanelImage: async () => { window.__copyCalls.push("panel"); return true; },
-  copyCardImage: async (r) => { window.__copyCalls.push("card" + Math.round(r.width) + "x" + Math.round(r.height)); return true; },
+  // 登录项：状态在系统那边（注册表 Run 键），面板只回读。loginerr=1 复现注册失败那一档的红字。
+  loginItemStatus: async () => ({ enabled: /loginok=1/.test(location.hash), error: /loginerr=1/.test(location.hash) ? ${JSON.stringify(LOGIN_ITEM_ERROR)} : "" }),
+  onLoginItem: () => () => {},
+  // 主进程重试回执：retry=N 让表头落到「加载中…(N)」那一档；loadfail=1 落「加载失败」。
+  onLoadStatus: (h) => {
+    const m = /retry=(\d+)/.exec(location.hash);
+    if (m) h({ retry: Number(m[1]) });
+    if (/loadfail=1/.test(location.hash)) h({ failed: true });
+    return () => {};
+  },
+  // 分享卡：桩记录「哪一页 / 哪个区间 / 哪个工具」，出图在真机主进程里做
+  copyShareImage: async (req) => {
+    window.__copyCalls.push((req && req.kind === "tool" ? "tool:" + req.toolId : "overview") + "@" + (req && req.range));
+    return true;
+  },
   getProjects: async () => (${JSON.stringify(TRAIL)}),
   openProject: async () => ({ ok: true }),
   copyProjectPath: async () => true,
@@ -558,8 +635,22 @@ window.tokei = {
     return window.__diag;
   },
   copyText: async (t) => { window.__copyText = (window.__copyText ?? []).concat(String(t).slice(0, 40)); return true; },
-  homeDir: async () => (${JSON.stringify(process.env.USERPROFILE || "C:\\Users\\A")}),
+  // 价格表段「全量更新」：桩造一次抓价，__price 控制返回，__priceHold 用来量「转圈 + 钮禁用」那一档
+  updatePrices: async () => {
+    window.__priceCalls = (window.__priceCalls ?? 0) + 1;
+    if (window.__priceHold) return new Promise(() => {});
+    return window.__price ?? { code: 0, message: "已更新 1234 个在线模型，保留 12 个历史模型 → C:\\Users\\me\\.tokei\\pricing.json" };
+  },
+  // 价格表段「查漏补缺」：同一套桩，只把返回文本换成主进程那句「补全 N 个模型」
+  updateUnknown: async () => {
+    window.__unknownCalls = (window.__unknownCalls ?? 0) + 1;
+    if (window.__unknownHold) return new Promise(() => {});
+    return window.__unknown ?? { code: 0, message: "补全 3 个模型" };
+  },
+  // 数据目录那一行诊断项的家目录：用中性占位，别把测量台生成物带上真实用户名
+  homeDir: async () => "C:\\Users\\me",
 };
+window.__settings = ${JSON.stringify(settings)};
 window.__curveFrames = ${JSON.stringify(curveFrames)};
 window.__detail = ${detail === null ? "null" : JSON.stringify(detail)};
 window.__dash = ${JSON.stringify(dash || DASH)};
@@ -710,7 +801,9 @@ const PROBE = (vw) => `<script>
     const state = document.querySelector("#tool-cards .page-state");
     if (state) lines.push("page-state " + box(state) + " '" + state.textContent.trim() + "'");
     const stamp = document.querySelector("#last-updated");
-    if (stamp) lines.push("stamp '" + stamp.textContent.trim() + "' " + box(stamp));
+    if (stamp) lines.push("stamp '" + stamp.textContent.trim() + "' " + box(stamp)
+      + " 裁=" + (stamp.scrollWidth > stamp.clientWidth + 1 ? "是" : "否")
+      + " 字号=" + getComputedStyle(stamp).fontSize);
     // 品牌头：秒表图标、节日角标、模式钮都在同一行里排队，逐个量一遍才看得出挤不挤
     const bar = document.querySelector(".topbar");
     if (bar) {
@@ -723,6 +816,22 @@ const PROBE = (vw) => `<script>
       lines.push("brand mark=" + (mk ? box(mk) : "无")
         + " 角标=" + (fe && !fe.hidden ? box(fe) + " '" + fe.textContent + "'" : "无")
         + " 文案=" + (bar.querySelector(".brand-text") ? box(bar.querySelector(".brand-text")) : "无"));
+      // 更新圆环（PV:2679-2755）：四档现身，其余 hidden；量它插进顶行后有没有把别的元素挤出去
+      const pill = bar.querySelector("#btn-update");
+      if (pill) {
+        lines.push("upd-pill " + (pill.hidden ? "隐" : box(pill) + " 类=" + pill.className
+          + " 环=" + (pill.querySelector(".upd-ring")
+            ? getComputedStyle(pill.querySelector(".upd-ring")).backgroundImage.slice(0, 44) : "无")
+          + " 字=" + (pill.querySelector(".upd-pct")
+            ? getComputedStyle(pill.querySelector(".upd-pct")).fontSize : "-")
+          + " 提示='" + pill.title + "'"));
+      }
+    }
+    // 面板尺寸：渲染进程量到的自然高度与发给主进程的两发（换页先 [宽,null] 再 [宽,高]）
+    if (typeof panelNaturalHeight === "function") {
+      lines.push("panel 自然高=" + panelNaturalHeight()
+        + " 发=" + JSON.stringify(window.__panelSizes)
+        + " 视口=" + window.innerWidth + "x" + window.innerHeight);
     }
     const foot = document.querySelector(".panel-foot");
     if (foot) lines.push("foot " + box(foot) + " | " + [...foot.children].map((c) => {
@@ -777,6 +886,21 @@ const PROBE = (vw) => `<script>
           + (model.scrollWidth > model.clientWidth + 1 ? "(裁" + model.scrollWidth + "/" + model.clientWidth + ")" : "") : "")
         + " | dots=" + row.querySelectorAll(".trail-dot").length
         + " | pin=" + box(row.querySelector(".trail-pin")));
+      const ports = row.querySelector(".trail-ports");
+      if (ports) {
+        lines.push("ports " + box(ports)
+          + " 横滚=" + (ports.scrollWidth > ports.clientWidth + 1
+            ? ports.scrollWidth + "/" + ports.clientWidth : "无")
+          + " 纵溢=" + (ports.scrollHeight > ports.clientHeight + 1
+            ? ports.scrollHeight + "/" + ports.clientHeight : "无")
+          + " | " + [...ports.querySelectorAll(".trail-port")].map((b) => {
+            const r = b.getBoundingClientRect();
+            return "'" + b.textContent.trim() + "'@" + r.left.toFixed(0) + ".." + r.right.toFixed(0)
+              + " " + r.width.toFixed(0) + "x" + r.height.toFixed(0)
+              + " 字=" + getComputedStyle(b).fontSize
+              + (b.scrollWidth > b.clientWidth + 1 ? "(裁)" : "");
+          }).join(" "));
+      }
     }
     for (const g of document.querySelectorAll(".trail-group")) {
       lines.push("group " + box(g) + " '" + g.textContent.trim() + "'");
@@ -819,6 +943,9 @@ const PROBE = (vw) => `<script>
       + " dpr=" + devicePixelRatio);
     lines.push("doc scroll=" + document.documentElement.scrollWidth + "x" + document.body.scrollHeight
       + " bodyH=" + document.body.clientHeight);
+    if (window.__updateCalls || window.__updateApply) {
+      lines.push("upd-actions check=" + window.__updateCalls + " apply=" + window.__updateApply);
+    }
     lines.push("cards=" + document.querySelectorAll(".view.is-active .card").length
       + " grid=" + document.querySelectorAll(".view.is-active .tool-grid").length
       + " metric=" + document.querySelectorAll(".view.is-active .metric").length
@@ -1070,6 +1197,20 @@ const PROBE = (vw) => `<script>
         + " 子=" + sec.querySelectorAll(".set-sec-body > *").length
         + " 右缘离窗=" + (VW - r.right).toFixed(1));
     }
+    // 版本与更新段（PV:2998-3060）：版本行与右侧动作的六档落点
+    const updRow = view.querySelector(".upd-row");
+    if (updRow) {
+      const right = view.querySelector("#update-state");
+      lines.push("upd " + box(updRow)
+        + " 版本='" + view.querySelector("#update-version").textContent.trim() + "'"
+        + " 状态='" + right.textContent.trim() + "'"
+        + " 动作=" + ([...right.querySelectorAll("[data-update-action]")]
+          .map((b) => b.dataset.updateAction).join(",") || "无")
+        + " 右侧=" + box(right)
+        + " 右缘离窗=" + (VW - rect(updRow).right).toFixed(1)
+        + " 溢出=" + (updRow.scrollWidth > updRow.clientWidth + 1
+          ? updRow.scrollWidth + "/" + updRow.clientWidth : "无"));
+    }
     // mini 开关：macOS controlSize(.mini) 约 26×15，整页应该只有这一档尺寸
     const sws = [...view.querySelectorAll(".set-sw")];
     lines.push("switch n=" + sws.length
@@ -1078,6 +1219,12 @@ const PROBE = (vw) => `<script>
       + " 滑块=" + (sws.length ? getComputedStyle(sws[0], "::after").width + "/"
         + getComputedStyle(sws[0], "::after").left : "-")
       + " 开色=" + (() => { const on = sws.find((s) => s.classList.contains("is-on")); return on ? getComputedStyle(on).backgroundColor : "无"; })());
+    // 「大」字号那一档：--ui-scale 是 applyFontScale 写进 :root 的，文字要跟着走、控件不跟着走
+    lines.push("字号 scale=" + getComputedStyle(document.documentElement).getPropertyValue("--ui-scale").trim()
+      + " 选中=" + [...view.querySelectorAll("#font-size-choice .seg")].map((b) => b.textContent + (b.classList.contains("is-active") ? "*" : "")).join(",")
+      + " 标题字=" + getComputedStyle(view.querySelector("\\.set-title")).fontSize
+      + " 副标题字=" + getComputedStyle(view.querySelector("\\.set-sub")).fontSize
+      + " 控件字=" + (view.querySelectorAll(".segmented .seg").length ? getComputedStyle(view.querySelector(".segmented .seg")).fontSize : "-"));
     // 分段选择器：样式 7 段 + 信息 3 段 + 区域 2 段 +（启用久坐时）间隔 3 段
     for (const seg of view.querySelectorAll(".segmented.is-mini")) {
       const r = rect(seg);
@@ -1134,6 +1281,34 @@ const PROBE = (vw) => `<script>
         + " 高/内高=" + rect(dText).height.toFixed(0) + "/" + dText.clientHeight.toFixed(0)
         + " 溢出=" + (dText.scrollHeight > dText.clientHeight + 1 ? "16行封顶" : "无")
         : " 正文=收起"));
+    // 价格表段（PV:3589-3618）：左列末节的两个按钮 + 转圈 + 9 号结果行 lineLimit(2)
+    const pSec = [...view.querySelectorAll(".set-col:first-child > .set-sec")]
+      .find((s) => s.querySelector(".set-sec-title")?.textContent.trim() === "价格表");
+    const pBar = pSec.querySelector(".diag-bar");
+    const pBtn = pSec.querySelector("#btn-price-sync");
+    const pBtn2 = pSec.querySelector("#btn-price-unknown");
+    const pSpin = pSec.querySelector("#price-spin");
+    const pRes = pSec.querySelector("#price-result");
+    const one = (b) => box(b) + " 文案='" + b.textContent.trim() + "' 禁用=" + b.disabled
+      + " 图标=" + box(b.querySelector("svg"));
+    const b1 = rect(pBtn), b2 = rect(pBtn2);
+    const overlap = b1.left < b2.right && b2.left < b1.right;
+    lines.push("价格 左列序=" + [...view.querySelectorAll(".set-col:first-child > .set-sec > .set-sec-head > .set-sec-title")]
+      .map((t) => t.textContent.trim()).join("/")
+      + " 条=" + box(pBar) + " 间距=" + getComputedStyle(pBar).gap
+      // 两个钮之间的实际间隙（Swift 那边 HStack(spacing:8)），以及会不会互相压住、超出条宽
+      + " 钮间隙=" + (b2.left - b1.right).toFixed(2) + " 相交=" + (overlap ? "有" : "无")
+      + " 溢出条=" + (b2.right > rect(pBar).right + 0.5 ? "超出" : "无")
+      + " 钮1=" + one(pBtn) + " 钮2=" + one(pBtn2)
+      + " 钮2与圈间隙=" + (pSpin.hidden ? "-" : (rect(pSpin).left - b2.right).toFixed(2))
+      + " 转圈=" + (pSpin.hidden ? "隐" : box(pSpin))
+      + " 结果=" + (pRes.hidden ? "隐" : box(pRes) + " 字号=" + getComputedStyle(pRes).fontSize
+        + " 色=" + getComputedStyle(pRes).color + " 行高=" + getComputedStyle(pRes).lineHeight
+        + " 封顶=" + getComputedStyle(pRes).webkitLineClamp
+        + " 高/内高=" + rect(pRes).height.toFixed(0) + "/" + pRes.clientHeight.toFixed(0)
+        + " 溢出=" + (pRes.scrollHeight > pRes.clientHeight + 1 ? "2行封顶裁掉" : "无")
+        + " 文='" + pRes.textContent.trim().slice(0, 30) + "…'"));
+    lines.push("价格 链路 抓价=" + (window.__priceCalls ?? 0) + " 查漏=" + (window.__unknownCalls ?? 0));
     // 远程采集的 copyBlock（PV:4683-4703）：pad8/圆角6/底 .04，文字四行封顶
     const cBlock = view.querySelector(".copy-block");
     const cText = cBlock.querySelector(".copy-text");
@@ -1154,6 +1329,23 @@ const PROBE = (vw) => `<script>
       + " act=" + view.querySelectorAll(".set-act").length
       + " provider行=" + view.querySelectorAll("#provider-fields .p-row").length
       + " 分隔=" + view.querySelectorAll(".thin-div").length);
+    // 隐私段逐元素：活跃统计那一行 + 它下面那段长说明（字号、行数、有没有被裁）
+    const privacy = view.querySelector("#privacy-rows");
+    if (privacy) {
+      const rows = [...privacy.children].slice(0, 2);
+      lines.push("privacy " + box(privacy) + " | " + rows.map((c) => {
+        const style = getComputedStyle(c);
+        const r = c.getBoundingClientRect();
+        const note = c.classList.contains("set-note");
+        return (c.className || c.tagName) + "@" + r.left.toFixed(0) + ".." + r.right.toFixed(0)
+          + " " + r.width.toFixed(0) + "x" + r.height.toFixed(0)
+          + (note ? " 字=" + style.fontSize + " 行高=" + style.lineHeight
+            + " 行=" + (parseFloat(style.lineHeight) ? Math.round(r.height / parseFloat(style.lineHeight)) : "-")
+            + " 溢出=" + (c.scrollHeight > c.clientHeight + 1 ? "裁" : "无") : "")
+          + " 文='" + String(c.textContent || "").trim().slice(0, 12) + "'";
+      }).join(" | ")
+        + " 开关=" + [...privacy.querySelectorAll(".set-sw")].slice(0, 1).map((i) => i.getAttribute("aria-checked") === "true" ? "开" : "关").join(""));
+    }
   }
 
   /**
@@ -1476,6 +1668,24 @@ const PROBE = (vw) => `<script>
         const r = document.querySelector("#btn-copy-remote"); if (r) r.click();
       }, 0);
     }
+    // 价格表段：price=1 跑完停在结果行，price=long 换一条两行都塞不下的长消息量 lineLimit(2)，
+    // price=hold 让抓价挂住，量「转圈 + 钮禁用」那一档，price=clear 再点一下结果行看它会不会自己收掉。
+    // price=unknown 点的是第二个钮（查漏补缺），price=none 让它回「所有模型已匹配 ✓」，
+    // price=unknown-hold 让它挂住 —— 原版的 priceUpdating 是一个开关管两个钮，所以这一档要看两个都禁用。
+    if (want.price) {
+      if (want.price === "hold") window.__priceHold = true;
+      if (want.price === "unknown-hold") window.__unknownHold = true;
+      if (want.price === "long" || want.price === "clear") {
+        window.__price = { code: 0, message: "已更新 503 个在线模型，保留 5 个历史模型 → C:\\Users\\me\\.tokei\\pricing.json，其中 anthropic/claude-sonnet-5、openai/gpt-5.5、google/gemini-3-pro 等 11 个模型的价格发生变化，历史成本会在下一次刷新时按新价目表重算完毕" };
+      }
+      if (want.price === "none") window.__unknown = { code: 0, message: "所有模型已匹配 ✓" };
+      const unknownClick = want.price === "unknown" || want.price === "unknown-hold" || want.price === "none";
+      const b = document.querySelector(unknownClick ? "#btn-price-unknown" : "#btn-price-sync");
+      if (b) b.click();
+      if (want.price === "clear") {
+        setTimeout(() => { const r = document.querySelector("#price-result"); if (r) r.click(); }, 0);
+      }
+    }
     if (want.menu) {
       const rows = [...document.querySelectorAll(".trail-row")];
       const row = want.menu === "last" ? rows[rows.length - 1] : rows[Number(want.menu) - 1] || rows[0];
@@ -1486,10 +1696,26 @@ const PROBE = (vw) => `<script>
       row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: x, clientY: y }));
     }
     if (want.setclick) {
-      // 设置页交互：样式末段、第一行卡片开关、第一行额度来源开关，只看处理器会不会抛
+      // 设置页交互：样式末段、字号末段、第一行卡片开关、第一行额度来源开关，只看处理器会不会抛
       document.querySelector("#style-preview .seg:last-child").click();
+      document.querySelector("#font-size-choice .seg:last-child").click();
       document.querySelector("#tool-toggles .set-tool").click();
       document.querySelector("#quota-choice .set-tool").click();
+    }
+    // 更新器两处动作：设置段「检查/重试」与头部圆环/设置段「升级」，看点击是否落到对应 IPC
+    if (want.updcheck) {
+      const b = document.querySelector('#update-state [data-update-action="check"]');
+      if (b) b.click();
+    }
+    if (want.updapply) {
+      const b = document.querySelector('#update-state [data-update-action="apply"]')
+        || document.querySelector("#btn-update:not([hidden])");
+      if (b) b.click();
+    }
+    if (want.fontscale) {
+      // 「大」字号的几何压力档：直接顶 --ui-scale = 1.12。链路（点段→存设置→写回→applyFontScale）
+      // 由 settings-click 那一档真点出来验证过，这里只把同一比例压到其它页面上量布局。
+      document.documentElement.style.setProperty("--ui-scale", "1.12");
     }
     if (want.camenu) {
       // 右键咖啡钮开菜单：corner 把光标钉在右下角，逼出夹取分支
@@ -1565,12 +1791,24 @@ function docFor(vw, curveFrames, detail, settings, pay, hash, dash) {
 const WIDE = 640, MID = 420, NARROW = 322;
 const cases = [
   // 用量页：可见卡片 >2 走 640 双列，≤2 走 322 单列（对应 useWide / pageWidth）
-  ["usage-year", "#tab=usage&range=5&deep=1", WIDE, SETTINGS],
-  ["usage-year-lean", "#tab=usage&range=5&deep=1", NARROW, LEAN],
+  ["usage-year", "#tab=usage&range=5&deep=1&strict=1", WIDE, SETTINGS],
+  ["usage-year-lean", "#tab=usage&range=5&deep=1&strict=1", NARROW, LEAN],
+  // 「大」字号那一档：卡片文字 ×1.12，量最满的年页（640 双列）与最紧的 322 单列
+  ["usage-font-large", "#tab=usage&range=5&deep=1&strict=1", WIDE, SETTINGS_FONT_LARGE],
+  ["usage-font-large-lean", "#tab=usage&range=5&deep=1&strict=1", NARROW, LEAN_FONT_LARGE],
   ["usage-year-nodisc", "#tab=usage&range=5&expand=0", WIDE, SETTINGS],
   ["usage-today", "#tab=usage&range=0", WIDE, SETTINGS],
   ["usage-festive", "#tab=usage&range=0&festive=2026-10-31", WIDE, SETTINGS],
   ["usage-today-lean", "#tab=usage&range=0", NARROW, LEAN],
+  // 开机垫的那一档（primeCachedUsage）：表头写「缓存数据 · 后台更新中」，比「等待刷新」长两个字，
+  // 量它在 640 / 322 / 「大」字号三档下会不会把顶行挤裁。
+  ["usage-primed", "#tab=usage&range=0&primed=1", WIDE, SETTINGS],
+  ["usage-primed-lean", "#tab=usage&range=0&primed=1", NARROW, LEAN],
+  ["usage-primed-big", "#tab=usage&range=0&primed=1&fontscale=1", NARROW, LEAN],
+  // 对照组：同一条顶行里「缓存数据 · 等待刷新」那一档（本轮扫描失败、沿用旧读数），
+  // 用来判断 primed 那句多一个字会不会是 322 顶行换行的新元凶，还是本来就会换。
+  ["usage-cached", "#tab=usage&range=0&ok0=1", WIDE, SETTINGS],
+  ["usage-cached-lean", "#tab=usage&range=0&ok0=1", NARROW, LEAN],
   ["usage-copy", "#tab=usage&range=5&copy=1&expand=0", WIDE, SETTINGS],
   // 防休眠：footer 咖啡钮的三种状态 + 右键菜单（含右下角夹取）+ 左键开关
   ["usage-ka-on", "#tab=usage&range=0&ka=on", WIDE, SETTINGS],
@@ -1590,6 +1828,9 @@ const cases = [
   ["usage-grok-share-lean", "#tab=usage&range=0", NARROW, LEAN_GROK, "grok"],
   ["usage-grok-ended", "#tab=usage&range=0", NARROW, LEAN_GROK, "grokend"],
   ["usage-grok-ended-wide", "#tab=usage&range=0", WIDE, SETTINGS, "grokend"],
+  // 合成 Grok 真实用量：平均 TTFT / 平均响应两格带 help 角标，本机日志永远给不出这两格
+  ["usage-grok-usage", "#tab=usage&range=0", NARROW, LEAN_GROK, "grokusage"],
+  ["usage-grok-usage-wide", "#tab=usage&range=0", WIDE, SETTINGS, "grokusage"],
   // 合成千问办公额度：团队共享资源包 + 明细 + 两条有效期行
   ["usage-qwen-quota", "#tab=usage&range=0", WIDE, SETTINGS, "qwen"],
   ["usage-qwen-lean", "#tab=usage&range=0", NARROW, LEAN_QWEN, "qwen"],
@@ -1598,6 +1839,12 @@ const cases = [
   ["usage-provider-quota", "#tab=usage&range=0", WIDE, SETTINGS, "provider"],
   ["usage-provider-lean", "#tab=usage&range=0", NARROW, LEAN_PROVIDER, "provider"],
   ["usage-provider-stale", "#tab=usage&range=0", NARROW, LEAN_PROVIDER, "providerstale"],
+  // 合成 Grok Bot 账号级用量：日桶只有「今天与每 7 天前」那几行，选「昨日」必然空，
+  // 用来量跨区间回退说明行；选「本年」是直接命中那一档，不该有回退行。
+  ["usage-grokbot", "#tab=usage&range=0", WIDE, SETTINGS, "grokbot"],
+  ["usage-grokbot-lean", "#tab=usage&range=0", NARROW, onlyLean(["grok_bot"]), "grokbot"],
+  ["usage-grokbot-back", "#tab=usage&range=1", NARROW, onlyLean(["grok_bot"]), "grokbot"],
+  ["usage-grokbot-year", "#tab=usage&range=5", NARROW, onlyLean(["grok_bot"]), "grokbot"],
   ["quota", "#tab=quota", WIDE, SETTINGS],
   ["quota-1h", "#tab=quota&curveSpan=1", WIDE, SETTINGS],
   ["quota-6h", "#tab=quota&curveSpan=6", WIDE, SETTINGS],
@@ -1622,8 +1869,35 @@ const cases = [
   ["quota-month-narrow", "#tab=quota&curveSpan=720", MID, SETTINGS],
   // 设置页：macOS 只有 640 一档宽度（settingsPanelWidth），304.5 双列；
   // settings-narrow 是人为压到 420 的压力档，右列必然出格，只看不判。
-  ["settings", "#tab=settings", WIDE, SETTINGS],
+  ["settings", "#tab=settings&strict=1", WIDE, SETTINGS],
+  // 隐私段第一行（应用活跃统计）：默认开的那一档与关掉的那一档
+  ["settings-activity-off", "#tab=settings", WIDE, SETTINGS_NO_ACTIVITY],
+  // 更新器六档：头部圆环只在 available/downloading/installing/failed 现身，设置段六档都有落点
+  ["usage-update-available", "#tab=usage&range=0&update=available", WIDE, SETTINGS],
+  ["usage-update-downloading", "#tab=usage&range=0&update=downloading", WIDE, SETTINGS],
+  ["usage-update-installing", "#tab=usage&range=0&update=installing", NARROW, LEAN],
+  ["usage-update-failed", "#tab=usage&range=0&update=failed", NARROW, LEAN],
+  ["settings-update-checking", "#tab=settings&update=checking", WIDE, SETTINGS],
+  ["settings-update-uptodate", "#tab=settings&update=upToDate", WIDE, SETTINGS],
+  ["settings-update-available", "#tab=settings&update=available&strict=1", WIDE, SETTINGS],
+  ["settings-update-downloading", "#tab=settings&update=downloading", WIDE, SETTINGS],
+  ["settings-update-installing", "#tab=settings&update=installing", WIDE, SETTINGS],
+  ["settings-update-failed", "#tab=settings&update=failed", WIDE, SETTINGS],
+  ["settings-update-big", "#tab=settings&update=available&fontscale=1", WIDE, SETTINGS_FONT_LARGE],
+  ["settings-update-narrow", "#tab=settings&update=failed", MID, SETTINGS],
+  // 两处动作落点：设置段「重试」与头部圆环（available 时等同设置段「升级」）
+  ["settings-update-click", "#tab=settings&update=failed&updcheck=1", WIDE, SETTINGS],
+  ["usage-update-click", "#tab=usage&range=0&update=available&updapply=1", WIDE, SETTINGS],
   ["settings-sit", "#tab=settings", WIDE, SETTINGS_SIT],
+  // 「大」字号（--ui-scale 1.12）：整页文字变大，量设置页各档控件会不会顶出盒子
+  ["settings-font-large", "#tab=settings&strict=1", WIDE, SETTINGS_FONT_LARGE],
+  // 登录项注册失败那一档：系统段多一行红字，量它会不会把左列撑破
+  ["settings-login-err", "#tab=settings&loginerr=1", WIDE, SETTINGS],
+  // 「大」字号压到其余三页：曲线页（区间标签最密）、数据面板（热力墙 + 排行）、项目页（长路径）
+  ["quota-font", "#tab=quota&fontscale=1", WIDE, SETTINGS],
+  ["quota-font-narrow", "#tab=quota&fontscale=1", MID, SETTINGS],
+  ["dashboard-font", `#tab=dashboard&today=${DASH_LAST}&noanim=1&fontscale=1`, WIDE, SETTINGS, null, DASH_FULL],
+  ["projects-font", "#tab=projects&fontscale=1", MID, LEAN],
   ["settings-quota-all", "#tab=settings", WIDE, SETTINGS_QUOTA_ALL],
   ["settings-quota-none", "#tab=settings", WIDE, SETTINGS_QUOTA_NONE],
   ["settings-click", "#tab=settings&setclick=1", WIDE, SETTINGS],
@@ -1635,6 +1909,21 @@ const cases = [
   // 在跑的那一档（转圈+禁用）与两处复制的落点
   ["settings-diag-hold", "#tab=settings&diag=hold", WIDE, SETTINGS],
   ["settings-diag-copy", "#tab=settings&diag=1&dclick=1", WIDE, SETTINGS],
+  // 价格表段三态：跑完的结果行、两行塞不下的长消息（量 lineLimit(2) 封顶）、在跑那一档（转圈+禁用）
+  ["settings-price", "#tab=settings&price=1", WIDE, SETTINGS],
+  ["settings-price-long", "#tab=settings&price=long", WIDE, SETTINGS],
+  ["settings-price-hold", "#tab=settings&price=hold", WIDE, SETTINGS],
+  // 点一下结果行清空（PV:3600 的 onTapGesture）：清完应该只剩按钮，且不会再抓一次价
+  ["settings-price-clear", "#tab=settings&price=clear", WIDE, SETTINGS],
+  // 「大」字号与 420 压力档：9px 结果行放大到 10.08px、长消息在窄列里会不会顶破盒子
+  ["settings-price-big", "#tab=settings&price=long&fontscale=1", WIDE, SETTINGS],
+  ["settings-price-narrow", "#tab=settings&price=long", MID, SETTINGS],
+  // 第二个钮「查漏补缺」三态 + 压力档：结果行文本、报「全部匹配」、在跑时两个钮一起禁用只转一个圈
+  ["settings-unknown", "#tab=settings&price=unknown", WIDE, SETTINGS],
+  ["settings-unknown-none", "#tab=settings&price=none", WIDE, SETTINGS],
+  ["settings-unknown-hold", "#tab=settings&price=unknown-hold", WIDE, SETTINGS],
+  ["settings-unknown-big", "#tab=settings&price=unknown&fontscale=1", WIDE, SETTINGS],
+  ["settings-unknown-narrow", "#tab=settings&price=unknown", MID, SETTINGS],
   ["projects", "#tab=projects&strict=1", WIDE, SETTINGS],
   ["projects-mid", "#tab=projects&strict=1", MID, LEAN],
   ["projects-pin", "#tab=projects&pin=demo&strict=1", MID, LEAN],
@@ -1668,8 +1957,10 @@ for (const [name, hash, vw, settings, variant, dash] of cases) {
   const syn = {
     fresh: PAYLOAD_CODEX, stale: PAYLOAD_CODEX_STALE,
     grok: PAYLOAD_GROK, grokend: PAYLOAD_GROK_ENDED, qwen: PAYLOAD_QWEN,
+    grokusage: PAYLOAD_GROK_USAGE,
     qwenstale: PAYLOAD_QWEN_STALE,
     provider: PAYLOAD_PROVIDER, providerstale: PAYLOAD_PROVIDER_STALE,
+    grokbot: PAYLOAD_GROKBOT,
   };
   const pay = variant ? syn[variant] : (dash === DASH_FULL ? PAYLOAD_GROKBOT : payload);
   if (!pay) throw new Error("未知合成变体 " + variant);

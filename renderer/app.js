@@ -77,6 +77,12 @@ const state = {
   refreshing: true,
   updated: null,
   loadError: "",
+  /** 对应 store.retryCount：主进程重试那一档推来的序号，0 表示没在重试 */
+  loadRetry: 0,
+  /** 手上这份还是上一轮落盘的缓存、本轮扫描没回（primeCachedUsage 那句「后台更新中」） */
+  primed: false,
+  /** 登录项的真实状态由系统保管，面板只回读（对应 LoginItemManager.enabled / errorMessage） */
+  login: { enabled: false, error: "" },
   /** 哪些 Provider 存了密钥（渲染进程只拿状态，拿不到明文） */
   stored: {},
   providerDraft: { sub2api_base_url: "", zai_region: "global", keys: { sub2api: "", zai: "", minimax: "" } },
@@ -132,6 +138,12 @@ const state = {
   diagOutput: "",
   diagRunning: false,
   diagExpanded: false,
+  /** 价格表段两个 @State（PV:157 priceUpdating / priceResult）+ 那 30 秒自动收起的定时器 */
+  priceRunning: false,
+  priceResult: "",
+  priceResultTimer: 0,
+  /** 更新器状态（对应 Updater.State 的六档），由主进程推送 */
+  update: { kind: "idle" },
 };
 
 /** 对应 macOS 设置里的「Provider 额度」段（PanelView.swift:3039-3159）；Zed 的 Keychain 授权是 macOS 专属，不移植 */
@@ -177,9 +189,12 @@ function credits(n) {
 /** nativeMoney：美元恒显示 $%.2f，人民币只在 >0 时以「 + 」并列，不做汇率换算 */
 function nativeMoney(usd, cny) {
   const u = Number(usd) || 0, c = Number(cny) || 0;
+  // 不到 1 分的写「<$0.01」：$0.00 看着像没算钱，其实是算了、只是很少
+  const amount = (symbol, value) => (value > 0 && value < 0.005
+    ? `<${symbol}0.01` : `${symbol}${value.toFixed(2)}`);
   const parts = [];
-  if (u > 0 || c <= 0) parts.push(`$${u.toFixed(2)}`);
-  if (c > 0) parts.push(`¥${c.toFixed(2)}`);
+  if (u > 0 || c <= 0) parts.push(amount("$", u));
+  if (c > 0) parts.push(amount("¥", c));
   return parts.join(" + ");
 }
 
@@ -214,17 +229,23 @@ function countdown(epoch) {
   return h > 0 ? `${h}h${m}m` : `${m}m`;
 }
 
-/** Fmt.beijingTime（Model.swift:1115）：写死东八区，跟本机时区无关 */
-function beijingText(epoch, full) {
-  const f = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai", hourCycle: "h23",
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  });
-  const p = {};
-  for (const x of f.formatToParts(new Date(Number(epoch) * 1000))) p[x.type] = x.value;
-  const short = `${p.month}-${p.day} ${p.hour}:${p.minute}`;
-  return full ? `${p.year}-${short}:${p.second}` : short;
+/** Fmt.remaining（Model.swift:1308-1314）：两天以上按天（16d6h），以内同 countdown，已过「已到期」 */
+function remainingText(epoch) {
+  const s = Math.floor(Number(epoch) - Date.now() / 1000);
+  if (s <= 0) return "已到期";
+  if (s >= 2 * 86400) return `${Math.floor(s / 86400)}d${Math.floor((s % 86400) / 3600)}h`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h${m}m` : `${Math.max(m, 1)}m`;
+}
+
+/**
+ * Fmt.localTimeZoneCaption（Model.swift:1297-1304）：「本地 · GMT+8」。
+ * Swift 拿的是系统的短标准名，浏览器侧只能按 UTC 偏移自己拼，半小时时区会写成 GMT+8.5。
+ */
+function localTimeZoneCaption() {
+  const offset = -new Date().getTimezoneOffset() / 60;
+  const abs = Math.abs(offset);
+  return `本地 · GMT${offset < 0 ? "-" : "+"}${Number.isInteger(abs) ? abs : abs.toFixed(1)}`;
 }
 
 /** Fmt.relativeDate 的日差：按日历天算，不是 24 小时倍数（跨夏令时靠取整兜住） */
@@ -334,6 +355,10 @@ function renderRangeControl() {
 const ICONS = {
   "dollarsign.circle": '<circle cx="8" cy="8" r="5.6"/><path d="M10.1 5.6c-.3-.8-1.2-1.2-2.1-1.2-1.1 0-1.9.6-1.9 1.4 0 2 3.9 1.4 3.9 3.3 0 .9-.9 1.5-2 1.5-1 0-1.8-.5-2.1-1.3M8 3v1.4M8 11.6V13"/>',
   "arrow.down": '<path d="M8 3.2v9.4M4.5 9.1 8 12.6l3.5-3.5"/>',
+  // 价格表段「全量更新」钮（PV:3592）
+  "arrow.down.circle": '<circle cx="8" cy="8" r="5.8"/><path d="M8 4.8v6.4M5.6 8.8 8 11.2l2.4-2.4"/>',
+  // 价格表段「查漏补缺」钮（PV:3597）
+  "magnifyingglass.circle": '<circle cx="7.2" cy="7.2" r="4.5"/><path d="M10.6 10.6 13.7 13.7"/>',
   "arrow.up": '<path d="M8 12.6V3.2M4.5 6.7 8 3.2l3.5 3.5"/>',
   "bolt.fill": '<path class="fill" d="M9.6 2 4 9.3h3.2l-.9 4.7L12.4 6.5H8.9z"/>',
   "square.stack.3d.up.fill": '<path class="fill" d="M8 2 13.6 4.9 8 7.8 2.4 4.9z"/><path d="M2.5 7.6 8 10.5l5.5-2.9M2.5 10.7 8 13.6l5.5-2.9"/>',
@@ -370,6 +395,10 @@ const ICONS = {
   ladybug: '<path d="M8 3.6a3.3 3.3 0 0 1 3.3 3.3v2.5A3.3 3.3 0 0 1 8 12.7a3.3 3.3 0 0 1-3.3-3.3V6.9A3.3 3.3 0 0 1 8 3.6z"/><path d="M8 4.2v8.2M4.9 7.3h6.2M5.2 9.7h5.6M4.9 5.7 3.3 4.3M11.1 5.7l1.6-1.4"/>',
   "chevron.up.circle": '<circle cx="8" cy="8" r="5.8"/><path d="M5.6 9.2 8 6.8l2.4 2.4"/>',
   "photo.on.rectangle": '<rect x="5" y="2.6" width="9.4" height="7.6" rx="1.5"/><path d="M11 14.2H3a1.4 1.4 0 0 1-1.4-1.4V5.6"/>',
+  "exclamationmark.circle": '<circle cx="8" cy="8" r="6"/><path d="M8 4.8v4M8 11.1v.2"/>',
+  "checkmark.circle.fill": '<circle cx="8" cy="8" r="6"/><path d="M5 8.2 7.2 10.4 11 5.8"/>',
+  "arrow.clockwise": '<path d="M13.1 7.6a5.2 5.2 0 0 0-9-3.2"/><path d="M13.5 3.4v3.6H9.9"/>',
+  "square.and.arrow.up": '<path d="M8 10.6V2.8M5 5.6 8 2.6l3 3"/><path d="M3.4 9.2v3.4a1.4 1.4 0 0 0 1.4 1.4h6.4a1.4 1.4 0 0 0 1.4-1.4V9.2"/>',
   checkmark: '<path d="M3 8.6 6.3 11.9 13 4.5"/>',
   "info.circle": '<circle cx="8" cy="8" r="5.8"/><path d="M8 7.2v3.9M8 4.9v.6"/>',
   // ↓ 数据面板页要用到的（WrappedView 的连续/成就徽章、DashboardView 的项目眼、热力明细关闭钮）
@@ -421,8 +450,11 @@ function costHeadline(value, caption) {
 
 /** Metric 是 [图标, 标签, 数值] 三元组 */
 function metricCell(m) {
-  return `<div class="metric"><span class="m-ic">${icon(m[0])}</span><span class="m-body">`
-    + `<span class="m-label">${escapeHtml(m[1])}</span><span class="m-value">${escapeHtml(m[2])}</span></span></div>`;
+  // MetricCell.help（Design.swift:246-268）：有说明时标签后跟一枚 8 号 info.circle，悬停整格出说明
+  const help = m[3] ? ` title="${escapeHtml(m[3])}"` : "";
+  return `<div class="metric"${help}><span class="m-ic">${icon(m[0])}</span><span class="m-body">`
+    + `<span class="m-label">${escapeHtml(m[1])}${m[3] ? icon("info.circle", "m-help") : ""}</span>`
+    + `<span class="m-value">${escapeHtml(m[2])}</span></span></div>`;
 }
 
 /** RingMetricCell：21 圆环、线宽 2.5、从 12 点顺时针；标签恒为 Cache Hit */
@@ -706,20 +738,22 @@ function codexBlock(card, n) {
 function codexResetCardsRow(cards) {
   const expires = (cards.expires || []).slice().sort((a, b) => Number(a) - Number(b));
   const open = state.expanded.has("disc:codex-reset");
+  // PV:849-853：收起那行按系统时区给到期时刻，再带上还剩多久
   const nearest = expires.length
-    ? `<span class="reset-nearest">最近 ${escapeHtml(beijingText(expires[0], false))} · 北京时间</span>` : "";
+    ? `<span class="reset-nearest">${escapeHtml(`${resetText(expires[0])} · ${remainingText(expires[0])}后`)}</span>` : "";
+  const help = expires.length ? `最近一张 ${remainingText(expires[0])} 后到期` : "查看重置卡到期时间";
   const head = `<button type="button" class="disc is-reset" data-disc="codex-reset"`
-    + ` aria-expanded="${open}" title="查看重置卡到期时间">`
+    + ` aria-expanded="${open}" title="${escapeHtml(help)}">`
     + `${icon("arrow.clockwise.circle.fill", "reset-ic")}<span class="reset-name">重置卡</span>`
     + `<span class="reset-count">${Number(cards.count)} 张</span><span class="filler"></span>${nearest}`
     + `${icon(open ? "chevron.down" : "chevron.right", "chev")}</button>`;
   if (!open) return head;
   const rows = expires.map((t, i) => `<div class="reset-item"><span class="reset-idx">${i + 1}</span>`
     + `<span class="reset-kind">完整重置</span><span class="filler"></span>`
-    + `<span class="reset-time">${escapeHtml(beijingText(t, true))}</span></div>`).join("");
+    + `<span class="reset-time">${escapeHtml(`${resetText(t)} · ${remainingText(t)}后`)}</span></div>`).join("");
   return head + `<div class="reset-panel${animIn("disc:codex-reset")}"><div class="reset-head">`
     + `<span class="rh-title">到期时间</span><span class="filler"></span>`
-    + `<span class="rh-tz">北京时间 UTC+8</span></div>${rows}</div>`;
+    + `<span class="rh-tz">${escapeHtml(localTimeZoneCaption())}</span></div>${rows}</div>`;
 }
 
 /** Kimi Code：额度来自官方 usages，登录态一过期就必须能表达「读数已过期」 */
@@ -727,13 +761,15 @@ function kimiCodeBlock(card, n) {
   const r = toolRange("kimicode", state.range) || emptyRange("kimicode");
   const hasQuota = n.p5 != null || n.pw != null;
   const hasStaleQuota = n.p5_stale === true || n.pw_stale === true;
+  // PV:773 / 777-779：Kimi 两处都写显式求和，不走 totalTokens（那会优先采用 tokens 字段）
+  const sumTokens = (x) => (x.in || 0) + (x.out || 0) + (x.cr || 0) + (x.cw || 0) + (x.reason || 0);
   const html = [cardHead("Kimi Code", r.sessions, "kimicode")];
   if (r.sessions > 0) {
-    html.push(costHeadline(human(fieldTokens("kimicode", r)), `${selLabel()} 总量`));
+    html.push(costHeadline(human(sumTokens(r)), `${selLabel()} 总量`));
     html.push(metricGrid([], r.hit, tokenUsageMetrics(r)));
     if ((r.models || []).length) html.push(tokenModelDisclosure(r.models, "kimicode"));
   } else if (hasQuota) {
-    html.push(usageEmptyHint(recentUsageHint((key) => fieldTokens("kimicode", toolRange("kimicode", key) || emptyRange("kimicode")))));
+    html.push(usageEmptyHint(recentUsageHint((key) => sumTokens(toolRange("kimicode", key) || emptyRange("kimicode")))));
   } else {
     html.push(emptyHint());
   }
@@ -945,8 +981,8 @@ function grokBlock(card, n) {
     items.push(["arrow.triangle.2.circlepath", "轮次", String(r.turns || 0)], ["wrench.and.screwdriver", "工具", String(r.tools || 0)]);
     if (r.duration > 0) items.push(["clock", "耗时", durationText(r.duration * 1000)]);
     if (r.ctx > 0) items.push(["chart.bar.fill", "窗口", `${Math.round(r.ctx)}%`]);
-    if (r.ttft > 0) items.push(["timer", "首字", `${(r.ttft / 1000).toFixed(1)}s`]);
-    if (r.response > 0) items.push(["speedometer", "响应", `${(r.response / 1000).toFixed(1)}s`]);
+    if (r.ttft > 0) items.push(["timer", "平均 TTFT", `${(r.ttft / 1000).toFixed(1)}s`, "首字延迟：从发出请求到收到第一个 token 的时间"]);
+    if (r.response > 0) items.push(["speedometer", "平均响应", `${(r.response / 1000).toFixed(1)}s`]);
     if (r.errors > 0) items.push(["exclamationmark.triangle", "错误", String(r.errors)]);
     if (r.cancellations > 0) items.push(["xmark.circle", "取消", String(r.cancellations)]);
     html.push(metricGrid([], r.usage_available ? r.hit : 0, items));
@@ -1041,12 +1077,74 @@ function grokAuthNotice(n) {
   });
 }
 
-/** Grok Bot：Windows 不查官方接口，只有本地活动这一条分支 */
+/**
+ * providerTokenUsageContent（PV:1035-1081）：账号级用量单独成格。
+ * 它和本地工具日志是同一次会话的两份口径，所以只列不并，避免重复计数。
+ */
+function providerTokenUsageContent(r, opts) {
+  const top = [];
+  if ((r.cost || 0) > 0) top.push(["dollarsign.circle", "API 价", `$${(Number(r.cost) || 0).toFixed(2)}`]);
+  if ((r.requests || 0) > 0) top.push(["arrow.triangle.2.circlepath", "请求", human(r.requests)]);
+  const details = [];
+  if ((r.in || 0) + (r.out || 0) + (r.cr || 0) + (r.cw || 0) + (r.reason || 0) > 0) {
+    details.push(["arrow.down", "输入", human(r.in)], ["arrow.up", "输出", human(r.out)]);
+    if (r.cr > 0) details.push(["bolt.fill", "缓存读", human(r.cr)]);
+    if (r.cw > 0) details.push(["square.stack.3d.up.fill", "缓存写", human(r.cw)]);
+    if (r.reason > 0) details.push(["brain", "推理", human(r.reason)]);
+  }
+  const caption = r.coverage || opts.periodLabel || selLabel();
+  const html = [costHeadline(human(fieldTokens("provider", r)), `${caption} 账号总量`),
+    `<p class="qs-note">${escapeHtml("账号级用量 · 单列统计，避免与本地工具日志重复计算")}</p>`];
+  if (top.length || details.length) html.push(metricGrid(top, r.hit, details));
+  if ((r.models || []).length) html.push(tokenModelDisclosure(r.models, opts.ns, { periodLabel: opts.periodLabel }));
+  return html.join("");
+}
+
+/**
+ * grokBotDisplay（PV:405-422）：选中的区间没有记录时，按 today→…→all 回退到最近一档有数据的区间，
+ * 卡片改画那一档并在卡头说明，免得选到没活动的区间就整张卡消失。
+ */
+const GROK_BOT_FALLBACK_ORDER = ["today", "yesterday", "week", "last_week", "month", "year", "all"];
+
+function grokBotDisplay(n) {
+  const pick = (key) => ({
+    key,
+    range: toolRange("grok_bot", key) || emptyRange("grok_bot"),
+    usage: (n && n.quota && n.quota.usage ? n.quota.usage.ranges[key] : null) || null,
+  });
+  const has = (d) => (d.range.sessions || 0) > 0 || (d.range.calls || 0) > 0 || (d.range.turns || 0) > 0
+    || (d.usage ? fieldTokens("grok_bot", d.usage) > 0 || (d.usage.requests || 0) > 0 : false);
+  const selected = pick(state.range);
+  if (has(selected)) return selected;
+  for (const key of GROK_BOT_FALLBACK_ORDER) {
+    if (key === state.range) continue;
+    const candidate = pick(key);
+    if (has(candidate)) return candidate;
+  }
+  return selected;
+}
+
+/** Grok Bot：本地活动 + 授权的账号级用量两路并存，谁有数据画谁 */
 function grokBotBlock(card, n) {
-  const r = toolRange("grok_bot", state.range) || emptyRange("grok_bot");
-  const html = [cardHead("Grok Bot", r.sessions, "grok_bot")];
-  if (r.sessions > 0 || r.calls > 0 || r.turns > 0) {
-    html.push(costHeadline(human(r.calls > 0 ? r.calls : r.turns), `${selLabel()} 响应`));
+  const d = grokBotDisplay(n);
+  const r = d.range;
+  const usage = d.usage;
+  const hasActivity = (r.sessions || 0) > 0 || (r.calls || 0) > 0 || (r.turns || 0) > 0;
+  const hasUsage = usage ? fieldTokens("grok_bot", usage) > 0 || (usage.requests || 0) > 0 : false;
+  const quotaReady = !!n.quota && n.quota.available === true;
+  // PV:1195-1196：只有画的是选中区间且本地有活动，才给这张卡配复制钮
+  const html = [cardHead("Grok Bot", r.sessions, hasActivity && d.key === state.range ? "grok_bot" : undefined)];
+  const fallbackNote = d.key === state.range ? ""
+    : `<p class="card-note">${escapeHtml(`${selLabel()}暂无活动，显示${rangeLabel(d.key)}最近记录`)}</p>`;
+  if (hasUsage) {
+    html.push(fallbackNote);
+    html.push(providerTokenUsageContent(usage, { ns: "grok_bot", periodLabel: rangeLabel(d.key) }));
+    if (hasActivity) {
+      html.push(`<p class="qs-note">${escapeHtml(`本地记录 · ${r.turns || 0} 条消息 · ${r.calls || 0} 次响应`)}</p>`);
+    }
+  } else if (hasActivity) {
+    html.push(fallbackNote);
+    html.push(costHeadline(human(r.calls > 0 ? r.calls : r.turns), `${rangeLabel(d.key)} 响应`));
     const items = [
       ["bubble.left", "你的消息", human(r.turns)],
       ["sparkles", "响应", human(r.calls)],
@@ -1054,16 +1152,20 @@ function grokBotBlock(card, n) {
     if (r.tools > 0) items.push(["wrench.and.screwdriver", "工具调用", human(r.tools)]);
     if (r.duration > 0) items.push(["clock", "活跃", durationText(r.duration * 1000)]);
     html.push(metricGrid(items, 0, []));
-    html.push(`<p class="hint-wrap">${escapeHtml("本地活动 · 授权后显示官方 Token、模型和成本")}</p>`);
-  } else {
+    html.push(`<p class="qs-note">${escapeHtml("本地活动 · 授权后显示官方 Token、模型和成本")}</p>`);
+  } else if (!quotaReady) {
     html.push(emptyHint());
+  }
+  if (quotaReady) {
+    if (hasActivity || hasUsage) html.push(thinDiv());
+    html.push(providerQuotaContent(n.quota));
   }
   card.insertAdjacentHTML("beforeend", html.join(""));
 }
 
-/** 千问办公：纯额度卡，没有任何本地 token 可画 */
+/** 千问办公：纯额度卡，没有任何本地 token 可画；PV:1489 用 cardHeadPlain，没有复制钮 */
 function qwenWorkBlock(card, n) {
-  const html = [cardHead("千问办公", 0, "qwenwork")];
+  const html = [cardHead("千问办公", 0)];
   const hasData = n.available === true || n.remaining != null || (n.segments || []).length > 0 || n.shared != null;
   if (hasData) {
     if (n.exceeded) html.push(`<div class="q-over">${icon("exclamationmark.triangle.fill")}`
@@ -1184,6 +1286,30 @@ function qwenQuotaStatus(n) {
 }
 
 /**
+ * unpricedModels（PV:1931-1935）：有 token、却既没有公开价也没有 Credits 的模型。
+ * 这些不估美元（不按别的模型猜价）。
+ */
+function unpricedModels(models) {
+  return (models || []).filter((m) => ((m.in || 0) + (m.out || 0) + (m.cr || 0) + (m.cw || 0) + (m.reason || 0)) > 0
+    && (m.cost || 0) === 0 && (m.cost_cny || 0) === 0 && (m.credits || 0) === 0);
+}
+
+/** estimatedCostLabel（PV:1937-1944）：用到的模型全都没公开价时写「—」，$0.00 看着像算出来的结果 */
+function estimatedCostLabel(r) {
+  const used = (r.models || []).filter((m) => (m.in || 0) + (m.out || 0) + (m.cr || 0) + (m.cw || 0) + (m.reason || 0) > 0);
+  if ((r.cost || 0) === 0 && (r.cost_cny || 0) === 0 && used.length > 0
+    && unpricedModels(used).length === used.length) return "—";
+  return nativeMoney(r.cost, r.cost_cny);
+}
+
+/** unpricedModelsNote（PV:1948-1957）：写明哪些模型没算进「≈成本」，免得把部分成本当成全部花费 */
+function unpricedModelsNote(models) {
+  const unpriced = unpricedModels(models);
+  if (!unpriced.length) return "";
+  return `<p class="unpriced-note">${escapeHtml(`≈成本未计入没有公开价的模型：${unpriced.map((m) => m.name).join(" · ")}`)}</p>`;
+}
+
+/**
  * Devin / MiniMax Code：本地 token 与联网额度互不相干，任何一半有数据就画那一半。
  * Windows 端 quota 恒空（还没接联网取数），所以只剩 token 与提示。
  */
@@ -1193,7 +1319,8 @@ function tokenAndQuotaBlock(card, opts) {
   const html = [cardHead(opts.title, r.sessions, opts.id)];
   if (hasUsage) {
     html.push(costHeadline(human(fieldTokens(opts.id, r)), `${selLabel()} 总量`));
-    html.push(metricGrid([["dollarsign.circle", "≈成本", nativeMoney(r.cost, r.cost_cny)]], r.hit, tokenUsageMetrics(r)));
+    html.push(metricGrid([["dollarsign.circle", "≈成本", estimatedCostLabel(r)]], r.hit, tokenUsageMetrics(r)));
+    html.push(unpricedModelsNote(r.models));
     if ((r.models || []).length) html.push(tokenModelDisclosure(r.models, opts.id));
   }
   const q = toolNode(opts.id)?.quota;
@@ -1237,10 +1364,11 @@ function tokenUsageBlock(card, opts) {
       + (opts.reasonIncludedInOutput ? 0 : (r.reason || 0));
     html.push(costHeadline(human(total), `${selLabel()} 总量`));
     const top = opts.showsCost === false ? []
-      : [["dollarsign.circle", "≈成本", nativeMoney(r.cost, r.cost_cny)]];
+      : [["dollarsign.circle", "≈成本", estimatedCostLabel(r)]];
     const creditMetrics = opts.showsCredits && r.credits > 0
       ? [["circle.hexagongrid.fill", "Credits", credits(r.credits)]] : [];
     html.push(metricGrid(top, r.hit, [...creditMetrics, ...tokenUsageMetrics(r, opts.inclusiveIO)]));
+    if (opts.showsCost !== false) html.push(unpricedModelsNote(r.models));
     if ((r.models || []).length) {
       html.push(tokenModelDisclosure(r.models, opts.id,
         { reasonIncludedInOutput: opts.reasonIncludedInOutput, inclusiveIO: opts.inclusiveIO }));
@@ -1383,12 +1511,19 @@ function toolActive(id, n, r) {
       || (n.reset_cards != null && Number(n.reset_cards.count) > 0);
     case "gemini": return r.sessions > 0 || fieldTokens("gemini", r) > 0;
     case "grok": return r.sessions > 0 || (r.usage_calls || 0) > 0 || n.pct != null;
-    case "grok_bot": return r.sessions > 0 || (r.calls || 0) > 0 || (r.turns || 0) > 0;
+    // PV:483-487：判的是回退后的那一档，选中的区间空着不代表这张卡没数据
+    case "grok_bot": {
+      const d = grokBotDisplay(n);
+      return (d.range.sessions || 0) > 0 || (d.range.calls || 0) > 0 || (d.range.turns || 0) > 0
+        || (d.usage ? fieldTokens("grok_bot", d.usage) > 0 || (d.usage.requests || 0) > 0 : false)
+        || (!!n.quota && n.quota.available === true);
+    }
     case "qoder": return (r.calls || 0) > 0 || (r.in || 0) + (r.cached || 0) + (r.out || 0) > 0;
     case "openclaw": return (r.tasks || 0) > 0 || fieldTokens("openclaw", r) > 0;
     case "codebuddy": return r.sessions > 0 || fieldTokens("codebuddy", r) > 0 || (r.credits || 0) > 0;
     case "kimicode": return r.sessions > 0 || n.p5 != null || n.pw != null || n.p5_stale === true || n.pw_stale === true;
-    case "devin": case "minimax": return r.sessions > 0 || !!n.quota;
+    // PV:561,565：active 判的是 quota.available，不是「有没有这个对象」——取数失败的空壳不该占格子
+    case "devin": case "minimax": return r.sessions > 0 || (n.quota && n.quota.available === true);
     case "qwenwork": return !!state.settings?.qwenwork_quota_enabled || n.available === true
       || n.remaining != null || (n.segments || []).length > 0 || n.shared != null;
     case "qoderwork": case "qodercli": case "qodercli_cn":
@@ -1418,6 +1553,9 @@ const TOKEN_USAGE_OPTS = {
   codebuddy: { showsCost: false, showsCredits: true },
   deepseek_harness: { inclusiveIO: true },
   musecode: { reasonIncludedInOutput: true },
+  // PV:528-536：两张 WorkBuddy 都开 showsCredits
+  workbuddy: { showsCredits: true },
+  workbuddy_ai: { showsCredits: true },
 };
 
 /** 卡片顺序 = PANEL_ORDER 的数组序，不按成本重排 */
@@ -2286,6 +2424,14 @@ function trailRow(p) {
     return `<i class="trail-dot" style="background:${color}"></i>`;
   }).join("");
   const model = p.top_model ? `<span class="trail-model">${escapeHtml(p.top_model)}</span>` : "";
+  // 端口胶囊（ProjectTrailView:187-207）：绿点 + localhost:端口，点开本地服务；超过 4 个横向滚动
+  const ports = (Array.isArray(p.ports) ? p.ports : []).map(Number)
+    .filter((n) => Number.isInteger(n) && n > 0 && n <= 65535);
+  const portRow = ports.length
+    ? `<div class="trail-ports">${ports.map((port) => `<button type="button" class="trail-port"`
+      + ` data-port="${port}" title="打开 http://localhost:${port}">`
+      + `<i class="trail-port-dot"></i>localhost:${port}</button>`).join("")}</div>`
+    : "";
   const shown = middleTruncate(abbreviatePath(p.path), 62);
   return `
     <div class="trail-row" data-path="${escapeHtml(p.path)}" title="${escapeHtml(p.path)}">
@@ -2302,6 +2448,7 @@ function trailRow(p) {
           <span class="trail-cost">${escapeHtml(nativeMoney(p.cost, p.cost_cny))}</span>
           ${model}
         </div>
+        ${portRow}
       </div>
       <button class="trail-pin${state.pinned.has(p.path) ? " is-pinned" : ""}" data-pin="${escapeHtml(p.path)}"
         title="${state.pinned.has(p.path) ? "取消置顶" : "置顶"}" aria-label="置顶">${state.pinned.has(p.path) ? "★" : "☆"}</button>
@@ -2934,6 +3081,8 @@ const MENU_STYLE_ITEMS = [
   ["compact", "数字"], ["artistic", "星轨"], ["palm", "椰影"],
 ];
 const MENU_DENSITY_ITEMS = [["full", "双额度"], ["lowest", "单额度"], ["icon", "仅图标"]];
+/** PanelFontSize.allCases 的标签（PanelTypography.swift:11）；scale 1 / 1.12 在 applyFontScale 里 */
+const PANEL_FONT_ITEMS = [["small", "小"], ["large", "大"]];
 
 /**
  * 状态栏额度来源：对应 MenuBarQuotaSource（MenuBarStyle.swift:66-147）。
@@ -2942,7 +3091,7 @@ const MENU_DENSITY_ITEMS = [["full", "双额度"], ["lowest", "单额度"], ["ic
 const QUOTA_SOURCES = [
   { id: "claude5h", label: "Claude 5h", color: "#eb8566", on: true },
   { id: "claudeWeek", label: "Claude 周", color: "#eb8566", on: false },
-  { id: "claudeFable", label: "Claude Fable", color: "#f5ae38", on: false },
+  { id: "claudeFable", label: "Claude Fable", color: "#ff9f0a", on: false },
   { id: "codex5h", label: "Codex 5h", color: "#6badfa", on: false },
   { id: "codexWeek", label: "Codex 周", color: "#6badfa", on: true },
   { id: "kimi5h", label: "Kimi 5h", color: "#33c7a8", on: false },
@@ -3036,7 +3185,7 @@ function renderSettings() {
   const systemBox = $("system-rows");
   const sitBox = $("sit-rows");
   [toolBox, quotaBox, privacyBox, systemBox, sitBox,
-    $("style-preview"), $("density-choice")].forEach((b) => { b.innerHTML = ""; });
+    $("style-preview"), $("density-choice"), $("font-size-choice")].forEach((b) => { b.innerHTML = ""; });
 
   // 显示卡片（PV:2969-3005）：勾掉的工具不再扫描，所以写回 disabled_tools
   const disabled = new Set(state.settings.disabled_tools || []);
@@ -3046,6 +3195,10 @@ function renderSettings() {
       void save({ disabled_tools: [...disabled] });
     }));
   }
+
+  // 界面（PV:2897-2928）：字体大小一档 mini 分段，改完立刻把 --ui-scale 盖上根元素
+  fillSegmented($("font-size-choice"), PANEL_FONT_ITEMS, state.settings.panel_font_size,
+    (v) => save({ panel_font_size: v }));
 
   // 菜单栏（PV:2804-2869）：样式、信息量两个 mini 分段 + 额度来源网格 + 摘要
   fillSegmented($("style-preview"), MENU_STYLE_ITEMS, state.settings.menu_style,
@@ -3060,9 +3213,13 @@ function renderSettings() {
   $("quota-choice-hint").textContent =
     quotaHintText(QUOTA_SOURCES.filter((s) => quotaSourceOn(s.id)));
 
-  // 隐私与额度（PV:3290-3346）：五项开关里 Windows 能落地的是这三项——
-  // 「应用活跃统计」要等遥测心跳（#28），「Claude Code CLI 额度查询」要等 CLI 那条取数路，
-  // 两者做出来之前不放开关，免得摆一个按下去没反应的钮。
+  // 隐私与额度（PV:3290-3346）：Windows 能落地的是这四项——
+  // 「Claude Code CLI 额度查询」要等 CLI 那条取数路，做出来之前不放开关，免得摆一个按下去没反应的钮。
+  // 顺序照原版：活跃统计在最前，说明文字逐字照抄（Windows 的 os_version 取 os.release()）。
+  privacyBox.appendChild(settingsToggleRow("应用活跃统计", !!state.settings.share_basic_activity,
+    (v) => save({ share_basic_activity: v })));
+  privacyBox.appendChild(sectionNote("用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。"));
+  privacyBox.appendChild(el("thin-div"));
   privacyBox.appendChild(settingsToggleRow("Grok 实时额度查询", !!state.settings.grok_live_quota_enabled,
     (v) => save({ grok_live_quota_enabled: v })));
   privacyBox.appendChild(sectionNote("默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。"));
@@ -3077,9 +3234,13 @@ function renderSettings() {
     (v) => save({ qwenwork_quota_enabled: v })));
   privacyBox.appendChild(sectionNote("默认关闭。开启后 Tokei 仅连接千问办公桌面端在本机 127.0.0.1 提供的受保护接口；千问办公可能随之向官方服务刷新额度。不读取或保存登录凭据，需保持千问办公已登录并运行。"));
 
-  // 系统（PV:2940-2966）
-  systemBox.appendChild(settingsToggleRow("登录时启动", !!state.settings.autostart,
+  // 系统（PV:3062-3089）：开关按系统回读的真实状态画，写失败才出那一行红字
+  systemBox.appendChild(settingsToggleRow("登录时启动", !!state.login.enabled,
     (v) => save({ autostart: v })));
+  if (state.login.error) {
+    const line = el("set-note is-error", state.login.error, "p");
+    systemBox.appendChild(line);
+  }
 
   // 久坐提醒（PV:3560-3587）：间隔 45/60/90，选了「启用」才展开
   sitBox.appendChild(settingsToggleRow("启用", !!state.settings.sit_reminder_enabled,
@@ -3108,6 +3269,7 @@ function renderSettings() {
 
   syncProviderUi();
   renderDiagnostics();
+  renderPricing();
 }
 
 /** 对应 debugSummary（PV:158-165）：只挑 exit / json / errors 三种行首，用「 · 」串成一行 */
@@ -3164,9 +3326,134 @@ async function runDiagnostics() {
   renderDiagnostics();
 }
 
+/**
+ * 价格表段（settingsPricingSection PV:3589-3618）：两个按钮共用 priceUpdating 这一个开关
+ * （谁在跑就把两个一起禁用、只转一个 mini 圈），跑的时候结果行按原版的条件
+ * `!priceResult.isEmpty && !priceUpdating` 隐藏，所以那句「…中…」赋值跟 macOS 一样是看不见的，
+ * 只为对齐留在这儿。
+ */
+function renderPricing() {
+  const sync = $("btn-price-sync");
+  if (!sync) return;
+  const unknown = $("btn-price-unknown");
+  sync.disabled = state.priceRunning;
+  unknown.disabled = state.priceRunning;
+  sync.innerHTML = icon("arrow.down.circle") + "<span>全量更新</span>";
+  unknown.innerHTML = icon("magnifyingglass.circle") + "<span>查漏补缺</span>";
+  $("price-spin").hidden = !state.priceRunning;
+  const out = $("price-result");
+  out.hidden = state.priceRunning || !state.priceResult;
+  out.textContent = state.priceResult;
+}
+
+/** 结果行露面后 30 秒自动收起（PV:3611-3615 那段 onAppear + asyncAfter），点一下也立刻收 */
+function rearmPriceResultTimer() {
+  clearTimeout(state.priceResultTimer);
+  if (!state.priceResult) return;
+  state.priceResultTimer = setTimeout(() => {
+    state.priceResult = "";
+    renderPricing();
+  }, 30_000);
+}
+
+/** 对应 runPriceUpdate(flag, msg)（PV:4190-4218）：--update-prices 与 --update-unknown 两个入口 */
+async function runPriceUpdate(kind) {
+  if (state.priceRunning) return;
+  state.priceRunning = true;
+  state.priceResult = kind === "unknown" ? "查漏补缺中…" : "全量更新中…";
+  renderPricing();
+  try {
+    const reply = kind === "unknown" ? await window.tokei.updateUnknown() : await window.tokei.updatePrices();
+    // 原版取的是子进程 stdout：抓价失败那行「更新失败:…」打在 stderr，界面上就是一片空白，
+    // 所以主进程只把要显示的那句传回来，这里跟着一起保持空。
+    state.priceResult = (reply && reply.message) || "";
+  } catch (e) {
+    console.error("价格表更新跑不起来", e);
+    state.priceResult = "";
+  }
+  state.priceRunning = false;
+  renderPricing();
+  rearmPriceResultTimer();
+}
+
+/**
+ * 更新器（对应 PanelView 的 updatePill / settingsUpdateSection）：六档状态都由主进程推来。
+ * 头部只有 available / downloading / installing / failed 四档现身，设置段六档都有落点。
+ */
+function updatePillHtml(s) {
+  if (s.kind === "available") return '<span class="upd-ring"></span>' + icon("arrow.up");
+  if (s.kind === "installing") return '<span class="upd-ring"></span>' + icon("square.and.arrow.up");
+  if (s.kind === "failed") return icon("exclamationmark.circle");
+  if (s.kind === "downloading") {
+    const pct = Math.round((Number(s.progress) || 0) * 100);
+    return `<span class="upd-ring" style="--p:${pct}"></span><span class="upd-pct">${pct}</span>`;
+  }
+  return "";
+}
+
+function updateSettingsHtml(s) {
+  if (s.kind === "checking") return '<span class="upd-state"><span class="diag-spin"></span>正在检查</span>';
+  if (s.kind === "upToDate") return `<span class="upd-state is-ok">${icon("checkmark.circle.fill")}已是最新版本</span>`;
+  if (s.kind === "available") {
+    return `<button type="button" class="set-act" data-update-action="apply">${icon("arrow.down.circle")}<span>升级到 ${escapeHtml(s.tag)}</span></button>`;
+  }
+  if (s.kind === "downloading") {
+    return `<span class="upd-state is-mono">下载中 ${Math.round((Number(s.progress) || 0) * 100)}%</span>`;
+  }
+  if (s.kind === "installing") return '<span class="upd-state"><span class="diag-spin"></span>正在安装</span>';
+  if (s.kind === "failed") {
+    return `<span class="upd-fail"><button type="button" class="set-act" data-update-action="check">${icon("arrow.clockwise")}<span>重试</span></button><span class="upd-msg">${escapeHtml(s.message)}</span></span>`;
+  }
+  return `<button type="button" class="set-act" data-update-action="check">${icon("arrow.triangle.2.circlepath")}<span>检查更新</span></button>`;
+}
+
+function renderUpdate() {
+  const s = state.update || { kind: "idle" };
+  const btn = $("btn-update");
+  if (btn) {
+    const visible = ["available", "downloading", "installing", "failed"].includes(s.kind);
+    btn.hidden = !visible;
+    btn.className = "update-pill" + (visible ? ` is-${s.kind}` : "");
+    btn.innerHTML = visible ? updatePillHtml(s) : "";
+    btn.title = s.kind === "available" ? `升级 ${s.tag}` : s.kind === "failed" ? "重试" : "";
+    btn.setAttribute("aria-label", btn.title || "更新");
+  }
+  const box = $("update-state");
+  if (box) box.innerHTML = updateSettingsHtml(s);
+}
+
+/** 主进程推来的状态：直接覆盖重画，不做本地推断（检查/下载的节奏都在主进程里） */
+function applyUpdateState(next) {
+  state.update = next && typeof next === "object" ? next : { kind: "idle" };
+  renderUpdate();
+}
+
+async function checkForUpdate() {
+  if (!window.tokei.checkUpdate) return;
+  applyUpdateState(await window.tokei.checkUpdate(true));
+}
+
+async function applyUpdate() {
+  if (!window.tokei.applyUpdate) return;
+  applyUpdateState(await window.tokei.applyUpdate());
+}
+
 async function save(patch) {
   state.settings = await window.tokei.setSettings(patch);
+  applyFontScale();
   render();
+  // 换页、改字号、显隐工具都会让宽度或内容高度变，尺寸交给同一条路重算（对应 layout.update(fitting:)）
+  applyPanelSize(state.tab);
+}
+
+/**
+ * 「界面 → 字体大小」的唯一落点（对应 PanelTypography.swift:4-22 的 scale 1 / 1.12）。
+ * macOS 只有 Theme.fontSize 出来的字号会缩放，图标与盒子尺寸不动，
+ * 所以这里只喂 --ui-scale 给 CSS 的 font-size（含三处 px 行高），其余一律不变。
+ */
+function applyFontScale() {
+  const scale = (state.settings?.panel_font_size === "large" ? 1.12 : 1).toFixed(4);
+  document.documentElement.style.setProperty("--ui-scale", scale);
 }
 
 /** 输入框只在自建 DOM 里建一次；每次 render 都重建会让人打一个字掉一次焦点 */
@@ -3291,14 +3578,17 @@ function clockTime(d) {
 }
 
 /**
- * 表头那一处读数（store.lastUpdated，main.swift:105-147）的四种取值：
+ * 表头那一处读数（store.lastUpdated，main.swift:55-147）的六种取值：
  * 成功一轮 → 更新 HH:mm:ss；扫描失败但手上还有旧数据 → 缓存数据 · 等待刷新；
- * 失败且没有数据 → 加载失败（同一轮 store.loadError 让整页换成失败态）；都还没有 → 加载中…
+ * 开机垫进来的那份还没被本轮扫描覆盖 → 缓存数据 · 后台更新中（primeCachedUsage，main.swift:69）；
+ * 一次都没扫出来 → 加载中…，重试那三档带上序号（store.lastUpdated = "加载中…(N)"，main.swift:107）；
+ * 三档用完仍失败 → 加载失败（同一轮 store.loadError 让整页换成失败态）。
  */
 function stampText() {
   if (state.updated) return `更新 ${clockTime(state.updated)}`;
   if (state.loadError) return "加载失败";
-  if (state.payload) return "缓存数据 · 等待刷新";
+  if (state.loadRetry && !state.payload) return `加载中…(${state.loadRetry})`;
+  if (state.payload) return state.primed ? "缓存数据 · 后台更新中" : "缓存数据 · 等待刷新";
   return "加载中…";
 }
 
@@ -3343,6 +3633,12 @@ function renderKeepAwake() {
 function applyKeepAwake(s) {
   if (s && typeof s === "object") state.keepAwake = s;
   renderKeepAwake();
+}
+
+/** 登录项回读（对应 LoginItemManager.enabled / errorMessage）：拿不到就维持系统默认 */
+function applyLoginItem(s) {
+  if (s && typeof s === "object") state.login = { enabled: s.enabled === true, error: String(s.error || "") };
+  render();
 }
 
 /** 勾选列和「关闭防休眠」要在打开那一刻按当前状态画（KA:139-152） */
@@ -3422,13 +3718,43 @@ function visibleToolCount() {
   return PANEL_ORDER.filter((id) => !disabled.has(id)).length;
 }
 
-function applyPanelWidth(tab) {
+/**
+ * 当前页的自然高度（对应 PanelPlacement.contentSize 里的 fitting 高度）：
+ * 面板是固定画布，内容在 .view-stack 里滚动，所以自然高度 = 内边距 + 顶栏 + 两段间距 + 页内内容 + footer。
+ * 页内内容取 active view 的 scrollHeight（比 offsetHeight 大时说明内容自己就超过了一屏）。
+ * 这里只量、不夹；夹到「屏高 0.88 且不低于 320」是主进程 panelPlacement.ts 的事。
+ */
+function panelNaturalHeight() {
+  const panel = document.querySelector(".panel");
+  const stack = $("view-stack");
+  const view = stack && stack.querySelector(".view.is-active");
+  if (!panel || !view) return 0;
+  const style = getComputedStyle(panel);
+  const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+  const gap = parseFloat(style.rowGap) || 0;
+  const stackStyle = getComputedStyle(stack);
+  const stackPadding = parseFloat(stackStyle.paddingTop) + parseFloat(stackStyle.paddingBottom);
+  const fixed = (panel.querySelector(".topbar")?.offsetHeight || 0)
+    + (panel.querySelector(".panel-foot")?.offsetHeight || 0);
+  return Math.ceil(padding + fixed + gap * 2 + stackPadding + Math.max(view.offsetHeight, view.scrollHeight));
+}
+
+/**
+ * 对应 PanelView 的 pageWidth(for: mode) + PanelLayoutContext.pageDidChange：
+ * 先落宽度让内容按新宽度重排，下一帧再量高度发第二发（用旧宽度量到的高度会把长页裁短）。
+ */
+function applyPanelSize(tab) {
   const wide = visibleToolCount() > 2;
   let w;
   if (tab === "quota" || tab === "settings") w = PANEL_WIDTH.wide;
   else if (tab === "usage") w = wide ? PANEL_WIDTH.wide : PANEL_WIDTH.cards;
   else w = wide ? PANEL_WIDTH.wide : PANEL_WIDTH.projects;
-  void window.tokei.setPanelWidth(w);
+  void (async () => {
+    await window.tokei.setPanelSize(w);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      void window.tokei.setPanelSize(w, panelNaturalHeight());
+    }));
+  })();
 }
 
 function selectTab(tab) {
@@ -3443,7 +3769,6 @@ function selectTab(tab) {
   //（Swift 的 force:true 只在每轮刷新推送那一发，见 boot 里的 onUsage）
   if (tab === "dashboard") void loadDashboard(state.dashPeriod, false);
   hideTrailMenu();
-  applyPanelWidth(tab);
   // 顶部条与 footer 钉住后所有页共用 .view-stack 这一个滚动容器，换页要回到顶部，
   // 否则会停在上一页的滚动位置（macOS 每页是独立 ScrollView，天然从顶部开始）。
   $("view-stack").scrollTop = 0;
@@ -3483,23 +3808,19 @@ function flashCopied(btn, doneText) {
 
 /**
  * 对应 footer 的复制图片（PanelView 的 copyUsageImage）：macOS 用 ImageRenderer 把分享卡
- * 画成 PNG，Windows 侧没有那套卡片渲染器，这里等价地直接截面板窗口——内容就是当前这块面板。
+ * 画成 PNG；Windows 侧由主进程开隐藏窗口按同一版式出图（core/shareCard.ts + share.html），
+ * 不是截屏——分享出去的是独立的一张卡。
  */
 async function copyPanelImage() {
   hideTrailMenu();
-  if (await window.tokei.copyPanelImage()) flashCopied($("btn-copy-image"), "已复制");
+  if (await window.tokei.copyShareImage({ kind: "overview", range: state.range })) flashCopied($("btn-copy-image"), "已复制");
 }
 
-/** 卡头那枚复制钮：按卡片在视口里的矩形截取，对应 macOS 单张卡的 copyCardImage */
+/** 卡头那枚复制钮：对应 copySingleToolImage（PV:2661），工具 ID 来自 data-copy-tool */
 async function copyCardImage(btn) {
-  const card = btn.closest(".card");
-  if (!card) return;
-  const rect = card.getBoundingClientRect();
-  const ok = await window.tokei.copyCardImage({
-    x: Math.round(rect.left), y: Math.round(rect.top),
-    width: Math.round(rect.width), height: Math.round(rect.height),
-  });
-  if (ok) flashCopied(btn, "");
+  const toolId = btn.dataset.copyTool;
+  if (!toolId) return;
+  if (await window.tokei.copyShareImage({ kind: "tool", range: state.range, toolId })) flashCopied(btn, "");
 }
 
 /**
@@ -3510,6 +3831,10 @@ async function copyCardImage(btn) {
 function applyPayload(payload) {
   state.payload = payload ?? null;
   state.refreshing = false;
+  // 本轮扫描回了：垫进来的那份要么被换新，要么确认还在用，两种都不再是「后台更新中」
+  state.primed = false;
+  // 有 payload 推过来就意味着这一发有结果了，重试序号该清（对应 store.retryCount = 0）
+  state.loadRetry = 0;
   if (state.payload && state.payload._ok !== false) {
     state.updated = new Date(Number(state.payload._at) || Date.now());
     state.loadError = "";
@@ -3527,10 +3852,28 @@ async function boot() {
   state.stored = (await window.tokei.credentialStatus()) || {};
   state.providerDraft.sub2api_base_url = state.settings.sub2api_base_url || "";
   state.providerDraft.zai_region = state.settings.zai_region || "global";
-  $("app-version").textContent = `v${await window.tokei.appVersion()} · Windows`;
+  const version = String(await window.tokei.appVersion());
+  $("app-version").textContent = `v${version} · Windows`;
+  $("update-version").textContent = `当前版本 v${version}`;
+  // 更新状态由主进程保管（检查/下载都只在那里跑），开机先取一次，之后接推送
+  applyUpdateState((await window.tokei.updateState?.()) ?? { kind: "idle" });
+  window.tokei.onUpdate?.(applyUpdateState);
+  applyFontScale();
   // 防休眠归主进程管（面板关掉断言也要继续），所以开面板先取一次快照再挂推送
   applyKeepAwake(await window.tokei.keepAwakeStatus?.());
   window.tokei.onKeepAwake?.((s) => applyKeepAwake(s));
+  // 登录项同理：状态存在系统里（注册表 Run 键），面板只做回读（PV:3064-3087）
+  applyLoginItem(await window.tokei.loginItemStatus?.());
+  window.tokei.onLoginItem?.(applyLoginItem);
+  window.tokei.onLoadStatus?.((s) => {
+    // 主进程那一发没扫出 payload 时的单独回执：重试档带序号，三档用完落失败态
+    if (s && s.retry) state.loadRetry = Number(s.retry) || 0;
+    else {
+      state.loadRetry = 0;
+      if (s && s.failed) state.loadError = "读取用量失败";
+    }
+    render();
+  });
   window.tokei.onUsage((payload) => {
     applyPayload(payload);
     render();
@@ -3543,8 +3886,9 @@ async function boot() {
     if (state.tab === "dashboard") void loadDashboard(state.dashPeriod, true);
   });
   const existing = await window.tokei.getUsage();
-  // 磁盘缓存那一份没有 _ok/_at：先按「缓存数据 · 等待刷新」画出来，等第一轮扫描盖上时间戳
-  if (existing) { state.payload = existing; render(); }
+  // 开机垫的那一份内部键已被主进程剥掉（连带 _ok/_at），表头先写「缓存数据 · 后台更新中」；
+  // 没有这个标记就是本轮扫描失败后沿用的旧读数，写「等待刷新」。第一轮回执到了再盖时间戳。
+  if (existing) { state.payload = existing; state.primed = existing._primed === true; render(); }
   await window.tokei.refreshNow();
 
   $("btn-refresh").onclick = async () => {
@@ -3559,6 +3903,16 @@ async function boot() {
   $("btn-github").onclick = () => void window.tokei.openExternal("https://github.com/cclank/tokei");
   $("btn-settings-close").onclick = () => selectTab("usage");
   $("btn-copy-image").onclick = () => copyPanelImage();
+  // 更新：头部圆环可点（可升级=下载安装，失败=重试），设置段的按钮走同一组动作
+  $("btn-update").onclick = () => {
+    if (state.update.kind === "available") void applyUpdate();
+    else if (state.update.kind === "failed") void checkForUpdate();
+  };
+  $("update-state").addEventListener("click", (e) => {
+    const action = e.target.closest?.("[data-update-action]")?.dataset.updateAction;
+    if (action === "apply") void applyUpdate();
+    else if (action === "check") void checkForUpdate();
+  });
   // 咖啡钮：左键一键开关（KA:115 的 toggle），右键开时长/模式菜单（KA:132）
   $("btn-keep-awake").onclick = async () => {
     applyKeepAwake(await (state.keepAwake.active
@@ -3592,6 +3946,14 @@ async function boot() {
   $("btn-diag").onclick = () => void runDiagnostics();
   $("btn-diag-copy").onclick = () => void window.tokei.copyText(state.diagOutput);
   $("btn-copy-remote").onclick = () => void window.tokei.copyText($("remote-setup-cmd").textContent);
+  // 价格表段：两个按钮各起一次更新（互斥，跑的时候都禁用），结果行点一下收起（PV:3610 onTapGesture）
+  $("btn-price-sync").onclick = () => void runPriceUpdate("prices");
+  $("btn-price-unknown").onclick = () => void runPriceUpdate("unknown");
+  $("price-result").onclick = () => {
+    state.priceResult = "";
+    clearTimeout(state.priceResultTimer);
+    renderPricing();
+  };
 
   $("trail-search").oninput = (e) => {
     state.trailQuery = e.target.value;
@@ -3637,6 +3999,9 @@ async function boot() {
   $("trail-list").addEventListener("click", (e) => {
     const pin = e.target.closest("[data-pin]");
     if (pin) { togglePin(pin.dataset.pin); return; }
+    // 端口胶囊：点开本地服务，不能顺带触发整行的「在终端打开」
+    const port = e.target.closest("[data-port]");
+    if (port) { void window.tokei.openExternal(`http://localhost:${Number(port.dataset.port)}`); return; }
     const row = e.target.closest(".trail-row");
     if (row) void runTrailAction(row.dataset.path, "terminal");
   });
@@ -3730,7 +4095,7 @@ async function boot() {
   if (state.tab === "projects") void loadTrail();
   if (state.tab === "quota") void loadCurve();
   if (state.tab === "dashboard") void loadDashboard(state.dashPeriod, false);
-  applyPanelWidth(state.tab);
+  applyPanelSize(state.tab);
   render();
 }
 

@@ -65,6 +65,35 @@ export function piModelId(msg: Record<string, any>): string {
   return model || provider || "unknown";
 }
 
+/** 经网关（如 magpie）选路由组时，会话里有两个模型名：message.model 是「请求的」，
+ * 可能是 group/<id> 这种分组名，根本不是一个模型；responseModel 是回包里厂商报的、
+ * 真正作答的那个。对应 _pi_served_model()：裸名补上 provider 前缀，好和带前缀的写法归并。 */
+export function piServedModel(msg: Record<string, any>): string {
+  const raw = msg.responseModel;
+  const served = typeof raw === "string" ? raw.trim() : "";
+  if (!served) return "";
+  const providerRaw = msg.provider;
+  const provider = typeof providerRaw === "string" ? providerRaw.trim() : "";
+  if (provider && !served.includes("/") && !served.startsWith("group/")) return `${provider}/${served}`;
+  return served;
+}
+
+/** 对应 _MODEL_PLACEHOLDERS 与 _names_model()：分组名、auto 这类占位值点不出具体模型 */
+const MODEL_PLACEHOLDERS = new Set(["auto", "default", "unknown", "none"]);
+
+export function namesModel(model?: string | null): boolean {
+  const s = (model || "").trim();
+  if (!s || s.startsWith("group/")) return false;
+  return !MODEL_PLACEHOLDERS.has(s.split("/").pop()!.toLowerCase());
+}
+
+/** 对应 _served_identity()：真实名优先、请求名兜底；都没有就是 unknown。 */
+export function servedIdentity(served: string, requested: string): string {
+  const real = (served || "").trim();
+  if (namesModel(real)) return real;
+  return (requested || "").trim() || "unknown";
+}
+
 /** 对应 _pi_usage_int()：首个存在且非 null 的字段取 int */
 export function piUsageInt(usage: Record<string, any>, ...fields: string[]): number {
   for (const field of fields) {
